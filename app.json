@@ -18,7 +18,10 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0F172A"
-      }
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "plugins": [
       [
@@ -26,7 +29,16 @@
         {
           "photosPermission": "O aplicativo precisa de acesso às suas fotos para ler o print das suas metas numéricas."
         }
-      ]
-    ]
+      ],
+      "expo-asset",
+      "expo-font",
+      "expo-status-bar",
+      "expo-sqlite"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "3cf25814-e80c-4448-8e21-63e68829265e"
+      }
+    }
   }
 }
