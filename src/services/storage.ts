@@ -3,9 +3,11 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
+import { DividaItem } from '../types';
 
 const CHAVE_GANHOS = '@amortiza_ganhos_v1';
 const CHAVE_META_BASE = '@amortiza_meta_base_v1';
+const CHAVE_DIVIDAS = '@amortiza_dividas_v1';
 
 export interface RegistroGanhoLocal {
   dataISO: string;
@@ -16,34 +18,26 @@ export interface RegistroGanhoLocal {
   atualizadoEm: string;
 }
 
-// Cache em memória de emergência caso qualquer módulo nativo esteja indisponível
 let cacheMemoriaGanhos: Record<string, RegistroGanhoLocal> = {};
-let cacheMemoriaMetaBase: number = 200;
+let cacheMemoriaMetaBase: number = 100;
+let cacheMemoriaDividas: DividaItem[] = [];
 
-/**
- * Salva um ganho no armazenamento local do celular.
- */
+// ─── GANHOS ──────────────────────────────────────────────────────────────────
 export async function salvarGanhoLocalmente(registro: RegistroGanhoLocal): Promise<void> {
-  // 1. Grava no cache de memória instantâneo
   cacheMemoriaGanhos[registro.dataISO] = registro;
 
-  // 2. Grava no AsyncStorage
   try {
     const raw = await AsyncStorage.getItem(CHAVE_GANHOS);
     const mapa: Record<string, RegistroGanhoLocal> = raw ? JSON.parse(raw) : {};
     mapa[registro.dataISO] = registro;
     await AsyncStorage.setItem(CHAVE_GANHOS, JSON.stringify(mapa));
-  } catch (err: any) {
-    // Se o AsyncStorage falhar por questão de módulo nativo, o cache em memória sustenta a sessão
+  } catch {
+    // Mantém no cache de memória
   }
 
-  // 3. Tenta sincronizar em segundo plano com o Supabase
   sincronizarComSupabaseSilencioso(registro);
 }
 
-/**
- * Carrega todos os ganhos salvos no celular.
- */
 export async function carregarGanhosLocais(): Promise<Record<string, RegistroGanhoLocal>> {
   try {
     const raw = await AsyncStorage.getItem(CHAVE_GANHOS);
@@ -52,28 +46,23 @@ export async function carregarGanhosLocais(): Promise<Record<string, RegistroGan
       cacheMemoriaGanhos = { ...cacheMemoriaGanhos, ...mapa };
       return cacheMemoriaGanhos;
     }
-  } catch (err: any) {
-    // Retorna cache de memória em caso de falha do módulo nativo
+  } catch {
+    // Retorna cache em memória
   }
   return cacheMemoriaGanhos;
 }
 
-/**
- * Salva a meta base diária no celular (ex: 200, 250).
- */
+// ─── META BASE ───────────────────────────────────────────────────────────────
 export async function salvarMetaBaseLocal(metaBase: number): Promise<void> {
   cacheMemoriaMetaBase = metaBase;
   try {
     await AsyncStorage.setItem(CHAVE_META_BASE, metaBase.toString());
-  } catch (err: any) {
-    // Mantém no cache de memória
+  } catch {
+    // Mantém no cache
   }
 }
 
-/**
- * Carrega a meta base diária salva no celular.
- */
-export async function carregarMetaBaseLocal(padrao: number = 200): Promise<number> {
+export async function carregarMetaBaseLocal(padrao: number = 100): Promise<number> {
   try {
     const val = await AsyncStorage.getItem(CHAVE_META_BASE);
     if (val) {
@@ -83,15 +72,55 @@ export async function carregarMetaBaseLocal(padrao: number = 200): Promise<numbe
         return parsed;
       }
     }
-  } catch (err: any) {
-    // Retorna cache em caso de erro
+  } catch {
+    // Retorna cache
   }
   return cacheMemoriaMetaBase || padrao;
 }
 
-/**
- * Sincroniza silenciosamente com o Supabase.
- */
+// ─── DÍVIDAS E CONTROLE MACRO (CARTEIRA) ─────────────────────────────────────
+export async function salvarDividaLocal(divida: DividaItem): Promise<DividaItem[]> {
+  const index = cacheMemoriaDividas.findIndex(d => d.id === divida.id);
+  if (index >= 0) {
+    cacheMemoriaDividas[index] = divida;
+  } else {
+    cacheMemoriaDividas.push(divida);
+  }
+
+  try {
+    await AsyncStorage.setItem(CHAVE_DIVIDAS, JSON.stringify(cacheMemoriaDividas));
+  } catch {
+    // Mantém no cache
+  }
+
+  return [...cacheMemoriaDividas];
+}
+
+export async function removerDividaLocal(id: string): Promise<DividaItem[]> {
+  cacheMemoriaDividas = cacheMemoriaDividas.filter(d => d.id !== id);
+  try {
+    await AsyncStorage.setItem(CHAVE_DIVIDAS, JSON.stringify(cacheMemoriaDividas));
+  } catch {
+    // Mantém no cache
+  }
+  return [...cacheMemoriaDividas];
+}
+
+export async function carregarDividasLocais(): Promise<DividaItem[]> {
+  try {
+    const raw = await AsyncStorage.getItem(CHAVE_DIVIDAS);
+    if (raw) {
+      const lista: DividaItem[] = JSON.parse(raw);
+      cacheMemoriaDividas = lista;
+      return lista;
+    }
+  } catch {
+    // Retorna cache
+  }
+  return cacheMemoriaDividas;
+}
+
+// ─── SUPABASE SILENCIOSO ──────────────────────────────────────────────────────
 async function sincronizarComSupabaseSilencioso(registro: RegistroGanhoLocal) {
   try {
     await supabase.from('metas').upsert([
@@ -104,6 +133,6 @@ async function sincronizarComSupabaseSilencioso(registro: RegistroGanhoLocal) {
       },
     ], { onConflict: 'data_referencia' });
   } catch {
-    // Silencioso - dados já estão protegidos localmente
+    // Silencioso
   }
 }

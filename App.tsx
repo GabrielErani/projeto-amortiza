@@ -1,6 +1,7 @@
-// Aplicativo Amortiza - Regra de Amortização por Fases da Semana e OCR On-Device
+// Aplicativo Amortiza - Dashboard Operacional Semanal e Carteira Macro
 // Documentação React Native: https://reactnative.dev/docs/getting-started
 // Documentação Safe Area Context: https://github.com/AppAndFlow/react-native-safe-area-context
+// Documentação AsyncStorage: https://react-native-async-storage.github.io/async-storage/
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -26,8 +27,11 @@ import {
   carregarGanhosLocais,
   salvarMetaBaseLocal,
   carregarMetaBaseLocal,
+  salvarDividaLocal,
+  removerDividaLocal,
+  carregarDividasLocais,
 } from './src/services/storage';
-import { MetaNumerica, GanhoDia } from './src/types';
+import { MetaNumerica, GanhoDia, DividaItem, SemanaMesInfo } from './src/types';
 
 const { width } = Dimensions.get('window');
 
@@ -53,7 +57,7 @@ function formatarDiaCompleto(date: Date): string {
 
 function obterSegundaDaSemana(date: Date): Date {
   const d = new Date(date);
-  const diaSemana = d.getDay(); // 0 = domingo, 1 = segunda...
+  const diaSemana = d.getDay();
   const diff = diaSemana === 0 ? -6 : 1 - diaSemana;
   d.setDate(d.getDate() + diff);
   d.setHours(0, 0, 0, 0);
@@ -93,16 +97,55 @@ function formatarPeriodo(dias: GanhoDia[]): string {
   return `${dias[0].dataExibicao} – ${dias[6].dataExibicao}`;
 }
 
+// ─── GERADOR DE SEMANAS DO MÊS PARA A CARTEIRA ────────────────────────────────
+function gerarSemanasDoMes(hoje: Date, ganhosLocais: Record<string, any>): SemanaMesInfo[] {
+  const ano = hoje.getFullYear();
+  const mes = hoje.getMonth();
+  const primeiroDiaMes = new Date(ano, mes, 1);
+  const ultimoDiaMes = new Date(ano, mes + 1, 0);
+
+  const semanas: SemanaMesInfo[] = [];
+  let cursor = obterSegundaDaSemana(primeiroDiaMes);
+  let numSemana = 1;
+  const hojeISO = toISOLocal(hoje);
+
+  while (cursor <= ultimoDiaMes) {
+    const fimSemana = new Date(cursor);
+    fimSemana.setDate(cursor.getDate() + 6);
+
+    const inicioISO = toISOLocal(cursor);
+    const fimISO = toISOLocal(fimSemana);
+
+    let totalSem = 0;
+    let isAtual = false;
+
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(cursor);
+      d.setDate(cursor.getDate() + i);
+      const iso = toISOLocal(d);
+      if (iso === hojeISO) isAtual = true;
+      if (ganhosLocais[iso]) {
+        totalSem += Number(ganhosLocais[iso].valor || 0);
+      }
+    }
+
+    semanas.push({
+      numeroSemana: numSemana,
+      rotulo: `Sem ${numSemana} (${cursor.getDate()}-${fimSemana.getDate()} ${cursor.toLocaleDateString('pt-BR', { month: 'short' })})`,
+      dataInicioISO: inicioISO,
+      dataFimISO: fimISO,
+      totalGanhos: totalSem,
+      isAtual: isAtual,
+    });
+
+    cursor.setDate(cursor.getDate() + 7);
+    numSemana++;
+  }
+
+  return semanas;
+}
+
 // ─── VERDADEIRA REGRA DE AMORTIZAÇÃO POR FASES / CASCATA ──────────────────────
-/**
- * Exemplo real:
- * Meta diária = 100.
- * Lançamento de 250 na Segunda:
- * - Segunda = 100% coberta (100) -> sobram 150
- * - Terça   = 100% coberta (100 amortizados por Segunda) -> sobram 50
- * - Quarta  = 50% coberta (50 amortizados por Segunda) -> sobram 0
- * - Quinta em diante = 0%
- */
 function calcularAmortizacaoPorFases(dias: GanhoDia[], metaBase: number): GanhoDia[] {
   let saldoCascata = 0;
   let diaOrigemExcedente = '';
@@ -161,25 +204,71 @@ function calcularAmortizacaoPorFases(dias: GanhoDia[], metaBase: number): GanhoD
   });
 }
 
+// ─── CÁLCULO AUTOMÁTICO DE DÍVIDAS MACRO (CARTEIRA) ───────────────────────────
+function calcularResumoDividas(dividas: DividaItem[]) {
+  let totalDiario = 0;
+  let totalMensal = 0;
+  let totalImprevistosAnualizado = 0;
+  let totalAnualCalculado = 0;
+
+  dividas.forEach((item) => {
+    if (item.tipo === 'diaria') {
+      totalDiario += item.valor;
+      totalAnualCalculado += item.valor * 365;
+    } else if (item.tipo === 'mensal') {
+      totalMensal += item.valor;
+      totalAnualCalculado += item.valor * 12;
+    } else if (item.tipo === 'imprevista') {
+      if (item.frequenciaImprevisto === 'diaria') {
+        totalAnualCalculado += item.valor * 365;
+        totalImprevistosAnualizado += item.valor * 365;
+      } else if (item.frequenciaImprevisto === 'mensal') {
+        totalAnualCalculado += item.valor * 12;
+        totalImprevistosAnualizado += item.valor * 12;
+      } else {
+        totalAnualCalculado += item.valor;
+        totalImprevistosAnualizado += item.valor;
+      }
+    }
+  });
+
+  return {
+    totalDiario,
+    totalMensal,
+    totalImprevistosAnualizado,
+    totalAnualCalculado,
+  };
+}
+
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 
 export default function App() {
   const hoje = new Date();
 
-  // Meta Base Diária (salva no celular)
+  // Controle de Telas (Tabs Principais)
+  const [telaAtiva, setTelaAtiva] = useState<'dashboard' | 'carteira'>('dashboard');
+
+  // Meta Base Diária
   const [metaDiariaBase, setMetaDiariaBase] = useState<number>(META_DIARIA_PADRAO);
 
-  // Semana completa com cálculos em cascata
+  // Dados da Semana Operacional
   const [diasSemana, setDiasSemana] = useState<GanhoDia[]>(() => {
     const estrutura = gerarEstruturaSemana(hoje);
     return calcularAmortizacaoPorFases(estrutura, META_DIARIA_PADRAO);
   });
+  const [diaSelecionadoIdx, setDiaSelecionadoIdx] = useState<number>(0);
 
-  const [diaSelecionadoIdx, setDiaSelecionadoIdx] = useState<number>(() => {
-    const estrutura = gerarEstruturaSemana(hoje);
-    const idx = estrutura.findIndex(d => d.isHoje);
-    return idx >= 0 ? idx : 0;
-  });
+  // Dados Macro da Carteira
+  const [semanasMes, setSemanasMes] = useState<SemanaMesInfo[]>([]);
+  const [semanaMesSelecionadaIdx, setSemanaMesSelecionadaIdx] = useState<number>(0);
+  const [dividas, setDividas] = useState<DividaItem[]>([]);
+
+  // Modais de Lançamento de Dívida
+  const [modalDividaAberto, setModalDividaAberto] = useState<boolean>(false);
+  const [tipoDividaNovo, setTipoDividaNovo] = useState<'diaria' | 'mensal' | 'imprevista'>('diaria');
+  const [frequenciaImprevistoNovo, setFrequenciaImprevistoNovo] = useState<'diaria' | 'mensal' | 'anual'>('anual');
+  const [descricaoDividaInput, setDescricaoDividaInput] = useState<string>('');
+  const [valorDividaInput, setValorDividaInput] = useState<string>('');
 
   // Modais de Navegação e Menu
   const [menuDrawerAberto, setMenuDrawerAberto] = useState<boolean>(false);
@@ -187,7 +276,7 @@ export default function App() {
   const [novaMetaBaseInput, setNovaMetaBaseInput] = useState<string>('100');
   const [modalEscolhaFABAberto, setModalEscolhaFABAberto] = useState<boolean>(false);
 
-  // Modal de Lançamento
+  // Modal de Lançamento de Ganho
   const [modalVisible, setModalVisible] = useState<boolean>(false);
   const [diaLancamentoIdx, setDiaLancamentoIdx] = useState<number>(0);
   const [valorDigitado, setValorDigitado] = useState<string>('');
@@ -198,7 +287,7 @@ export default function App() {
   const [ocrConfirmacaoPronta, setOcrConfirmacaoPronta] = useState<boolean>(false);
   const [valorExtraidoOCR, setValorExtraidoOCR] = useState<number>(0);
 
-  // Histórico
+  // Histórico Supabase
   const [metasBanco, setMetasBanco] = useState<MetaNumerica[]>([]);
   const [atualizando, setAtualizando] = useState<boolean>(false);
 
@@ -211,26 +300,40 @@ export default function App() {
   const metaTotalSemana = metaDiariaBase * 7;
   const diasAmortizadosCompletos = diasSemana.filter(d => d.percentual === 100).length;
 
-  // Valor atual que o dia já possui registrado
+  // Cálculos Macro da Carteira
+  const resumoDividas = calcularResumoDividas(dividas);
+  const totalMes = semanasMes.reduce((acc, s) => acc + s.totalGanhos, 0);
+  const semanaSelecionadaInfo = semanasMes[semanaMesSelecionadaIdx] || semanasMes[0];
+
   const valorJaExistente = diaLancamento.valor || 0;
   const valorNovoNumerico = parseFloat(valorDigitado.replace(',', '.')) || 0;
   const valorSomadoPreview = valorJaExistente + valorNovoNumerico;
 
-  // ─── CARREGAMENTO INICIAL: LOCAL STORAGE (OFFLINE-FIRST) + SUPABASE ──────────
+  // ─── CARREGAMENTO INICIAL: LOCAL STORAGE + SUPABASE ──────────────────────────
   useEffect(() => {
-    inicializarDados();
+    inicializarTudo();
   }, []);
 
-  const inicializarDados = async () => {
+  const inicializarTudo = async () => {
     const baseSalva = await carregarMetaBaseLocal(META_DIARIA_PADRAO);
     setMetaDiariaBase(baseSalva);
     setNovaMetaBaseInput(baseSalva.toString());
+
+    const dividasSalvas = await carregarDividasLocais();
+    setDividas(dividasSalvas);
+
     await recarregarGanhosCombinados(baseSalva);
   };
 
   const recarregarGanhosCombinados = async (baseMeta: number) => {
     const estrutura = gerarEstruturaSemana(hoje);
     const ganhosLocais = await carregarGanhosLocais();
+
+    // Gera lista das semanas do mês
+    const sMes = gerarSemanasDoMes(hoje, ganhosLocais);
+    setSemanasMes(sMes);
+    const idxAtiva = sMes.findIndex(s => s.isAtual);
+    if (idxAtiva >= 0) setSemanaMesSelecionadaIdx(idxAtiva);
 
     let diasAtualizados = estrutura.map(dia => {
       const reg = ganhosLocais[dia.dataISO];
@@ -261,7 +364,7 @@ export default function App() {
         });
       }
     } catch {
-      // Ignora erro se offline
+      // Offline fallback
     }
 
     const semanaCalculada = calcularAmortizacaoPorFases(diasAtualizados, baseMeta);
@@ -276,17 +379,19 @@ export default function App() {
         setMetasBanco(res.data);
       }
     } catch {
-      // Ignora erro de histórico se offline
+      // Silencioso
     }
   };
 
   const onRefresh = useCallback(async () => {
     setAtualizando(true);
     await recarregarGanhosCombinados(metaDiariaBase);
+    const dividasAtualizadas = await carregarDividasLocais();
+    setDividas(dividasAtualizadas);
     setAtualizando(false);
   }, [metaDiariaBase]);
 
-  // ─── ABERTURA DO MODAL DE LANÇAMENTO (SELEÇÃO RÁPIDA DE DIAS) ───────────────
+  // ─── ABERTURA MODAL LANÇAMENTO GANHO ─────────────────────────────────────────
   const abrirModalParaDia = (idx: number) => {
     setDiaLancamentoIdx(idx);
     setValorDigitado('');
@@ -295,54 +400,8 @@ export default function App() {
     setModalVisible(true);
   };
 
-  // ─── OCR VIA GALERIA ────────────────────────────────────────────────────────
-  const handleAbrirCapturaOCR = async () => {
-    setModalEscolhaFABAberto(false);
-    try {
-      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permissionResult.granted) {
-        Alert.alert('Permissão necessária', 'É preciso permitir acesso às fotos para carregar o print de ganhos.');
-        return;
-      }
-
-      const pickerResult = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: false,
-        quality: 0.8,
-      });
-
-      if (!pickerResult.canceled && pickerResult.assets && pickerResult.assets.length > 0) {
-        const uri = pickerResult.assets[0].uri;
-
-        setModalVisible(true);
-        setAnalisandoOCR(true);
-        setOcrConfirmacaoPronta(false);
-
-        processarImagemComOCR(uri);
-      }
-    } catch (error: any) {
-      Alert.alert('Erro', 'Falha ao abrir galeria: ' + (error?.message || 'Tente novamente'));
-    }
-  };
-
-  const processarImagemComOCR = async (uri: string) => {
-    try {
-      const resultado = await processarOCRLocal(uri);
-      const valorEncontrado = resultado.valorMetaExtrado ?? 0;
-      setValorExtraidoOCR(valorEncontrado);
-      setValorDigitado(valorEncontrado > 0 ? valorEncontrado.toFixed(2) : '');
-
-      setTimeout(() => {
-        setAnalisandoOCR(false);
-        setOcrConfirmacaoPronta(true);
-      }, 1000);
-    } catch {
-      setAnalisandoOCR(false);
-    }
-  };
-
-  // ─── SALVAR GANHO: COM OPÇÃO DE SOMAR (ACUMULAR) OU SUBSTITUIR ──────────────
-  const handleExecutarSalvar = async (modo: 'somar' | 'substituir') => {
+  // ─── SALVAR GANHO (SOMAR OU SUBSTITUIR) ─────────────────────────────────────
+  const handleExecutarSalvarGanho = async (modo: 'somar' | 'substituir') => {
     const valorDigitadoNum = parseFloat(valorDigitado.replace(',', '.')) || 0;
 
     if (valorDigitadoNum <= 0 && modo === 'somar') {
@@ -357,19 +416,16 @@ export default function App() {
     setSalvando(true);
 
     try {
-      // 1. Atualiza o dia no array com o valor acumulado
       const semanaModificada = diasSemana.map((d, i) =>
         i === diaLancamentoIdx ? { ...d, valor: valorFinal, temRegistro: true } : d
       );
 
-      // 2. Recalcula a amortização por fases em toda a semana
       const semanaRecalculada = calcularAmortizacaoPorFases(semanaModificada, metaDiariaBase);
       setDiasSemana(semanaRecalculada);
       setDiaSelecionadoIdx(diaLancamentoIdx);
 
       const diaAtualizado = semanaRecalculada[diaLancamentoIdx];
 
-      // 3. Salva no celular via AsyncStorage (NUNCA SOME)
       await salvarGanhoLocalmente({
         dataISO: diaAtualizado.dataISO,
         valor: valorFinal,
@@ -379,9 +435,12 @@ export default function App() {
         atualizadoEm: new Date().toISOString(),
       });
 
+      // Atualiza também as semanas do mês na carteira
+      const ganhosAtualizados = await carregarGanhosLocais();
+      setSemanasMes(gerarSemanasDoMes(hoje, ganhosAtualizados));
+
       setModalVisible(false);
 
-      // Feedback explicativo da cascata
       const diasAmortizados = semanaRecalculada
         .filter((d, i) => i > diaLancamentoIdx && d.percentual > 0)
         .map(d => `${d.sigla} (${d.percentual}%)`);
@@ -397,6 +456,61 @@ export default function App() {
     } finally {
       setSalvando(false);
     }
+  };
+
+  // ─── GESTÃO DE DÍVIDAS (SALVAR / EXCLUIR) ────────────────────────────────────
+  const handleAbrirNovaDivida = (tipo: 'diaria' | 'mensal' | 'imprevista') => {
+    setTipoDividaNovo(tipo);
+    setFrequenciaImprevistoNovo('anual');
+    setDescricaoDividaInput('');
+    setValorDividaInput('');
+    setModalDividaAberto(true);
+  };
+
+  const handleSalvarDivida = async () => {
+    const valorNum = parseFloat(valorDividaInput.replace(',', '.'));
+    if (isNaN(valorNum) || valorNum <= 0) {
+      Alert.alert('Valor inválido', 'Informe um valor de dívida maior que zero.');
+      return;
+    }
+
+    if (!descricaoDividaInput.trim()) {
+      Alert.alert('Descrição necessária', 'Informe o nome ou categoria da dívida (ex: Combustível, Parcela).');
+      return;
+    }
+
+    const novoItem: DividaItem = {
+      id: Date.now().toString(),
+      descricao: descricaoDividaInput.trim(),
+      valor: valorNum,
+      tipo: tipoDividaNovo,
+      frequenciaImprevisto: tipoDividaNovo === 'imprevista' ? frequenciaImprevistoNovo : undefined,
+      dataLancamento: toISOLocal(new Date()),
+    };
+
+    const listaAtualizada = await salvarDividaLocal(novoItem);
+    setDividas(listaAtualizada);
+    setModalDividaAberto(false);
+
+    Alert.alert('Dívida Registrada!', `A dívida anual projetada foi recalculada automaticamente.`);
+  };
+
+  const handleExcluirDivida = async (id: string, desc: string) => {
+    Alert.alert(
+      'Remover Dívida',
+      `Deseja excluir "${desc}" da sua carteira?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Excluir',
+          style: 'destructive',
+          onPress: async () => {
+            const lista = await removerDividaLocal(id);
+            setDividas(lista);
+          },
+        },
+      ]
+    );
   };
 
   // ─── SALVAR NOVA META BASE ──────────────────────────────────────────────────
@@ -417,6 +531,43 @@ export default function App() {
     Alert.alert('Meta Base Atualizada!', `Sua meta diária base agora é de R$ ${novaBase.toFixed(2)}.`);
   };
 
+  // OCR
+  const handleAbrirCapturaOCR = async () => {
+    setModalEscolhaFABAberto(false);
+    try {
+      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permissionResult.granted) {
+        Alert.alert('Permissão necessária', 'É preciso permitir acesso às fotos.');
+        return;
+      }
+
+      const pickerResult = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        quality: 0.8,
+      });
+
+      if (!pickerResult.canceled && pickerResult.assets && pickerResult.assets.length > 0) {
+        const uri = pickerResult.assets[0].uri;
+        setModalVisible(true);
+        setAnalisandoOCR(true);
+        setOcrConfirmacaoPronta(false);
+
+        const res = await processarOCRLocal(uri);
+        const val = res.valorMetaExtrado ?? 0;
+        setValorExtraidoOCR(val);
+        setValorDigitado(val > 0 ? val.toFixed(2) : '');
+
+        setTimeout(() => {
+          setAnalisandoOCR(false);
+          setOcrConfirmacaoPronta(true);
+        }, 1000);
+      }
+    } catch {
+      setAnalisandoOCR(false);
+    }
+  };
+
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
@@ -432,13 +583,11 @@ export default function App() {
             <Text style={styles.headerIconText}>☰</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.periodDropdown}
-            onPress={() => Alert.alert('Período Ativo', `Semana de ${periodo}.\nMeta semanal total: R$ ${metaTotalSemana.toFixed(2)}.`)}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.periodDropdownText}>{periodo} ▾</Text>
-          </TouchableOpacity>
+          <View style={styles.headerTitleContainer}>
+            <Text style={styles.headerMainTitle}>
+              {telaAtiva === 'dashboard' ? 'Amortiza • Semana' : 'Amortiza • Carteira'}
+            </Text>
+          </View>
 
           <TouchableOpacity style={styles.iconButton} onPress={onRefresh} activeOpacity={0.7}>
             <Text style={styles.headerIconText}>↻</Text>
@@ -453,182 +602,403 @@ export default function App() {
               refreshing={atualizando}
               onRefresh={onRefresh}
               tintColor="#00E676"
-              colors={['#00D26A']}
+              colors={['#00E676']}
             />
           }
         >
-          {/* GANHO TOTAL DA SEMANA */}
-          <View style={styles.mainEarningsCard}>
-            <View style={styles.earningsHeaderRow}>
-              <Text style={styles.earningsLabel}>Ganho Total da Semana</Text>
-              <TouchableOpacity
-                style={styles.gearButton}
-                onPress={() => {
-                  setNovaMetaBaseInput(metaDiariaBase.toString());
-                  setModalMetaBaseAberto(true);
-                }}
-              >
-                <Text style={styles.gearButtonText}>⚙️ Meta: R$ {metaDiariaBase.toFixed(0)}</Text>
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.totalAmountText}>
-              R$ {totalSemana.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </Text>
-
-            {/* SUB-DESTAQUE: DIA SELECIONADO & BOTÃO LANÇAR */}
-            <View style={styles.selectedDayRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.selectedDayLabel}>{diaSelecionado.diaCompleto}:</Text>
-                <Text style={styles.selectedDayValue}>
-                  {diaSelecionado.valor > 0
-                    ? `Fez R$ ${diaSelecionado.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                    : 'Sem ganho trabalhado'}
-                </Text>
-                <Text style={styles.selectedDayMetaInfo}>
-                  Status: {diaSelecionado.detalheAmortizacao}
-                </Text>
-              </View>
-
-              <TouchableOpacity
-                style={styles.btnEditarGanho}
-                onPress={() => abrirModalParaDia(diaSelecionadoIdx)}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.btnEditarGanhoTexto}>
-                  {diaSelecionado.valor > 0 ? '+ Adicionar' : '+ Inserir'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          {/* GRÁFICO DE BARRAS DE AMORTIZAÇÃO (7 DIAS COM % COBERTO DE CADA FASE) */}
-          <View style={styles.chartContainer}>
-            <View style={styles.barsRow}>
-              {diasSemana.map((item, index) => {
-                const isSelected = index === diaSelecionadoIdx;
-                const alturaBarra = Math.max(10, item.percentual);
-
-                // Cor da barra dependendo do status de amortização
-                let corBarra = '#334155';
-                if (item.statusAmortizacao === 'atingida') corBarra = '#00E676';
-                else if (item.statusAmortizacao === 'adiantada') corBarra = '#38BDF8';
-                else if (item.statusAmortizacao === 'parcial') corBarra = '#FBBF24';
-
-                return (
+          {/* ══════════════════════════════════════════════════════════════════════
+              TELA 1: DASHBOARD OPERACIONAL SEMANAL
+              ══════════════════════════════════════════════════════════════════════ */}
+          {telaAtiva === 'dashboard' && (
+            <>
+              {/* GANHO TOTAL DA SEMANA */}
+              <View style={styles.mainEarningsCard}>
+                <View style={styles.earningsHeaderRow}>
+                  <Text style={styles.earningsLabel}>Ganho Total da Semana</Text>
                   <TouchableOpacity
-                    key={index}
-                    style={styles.barColumn}
-                    onPress={() => setDiaSelecionadoIdx(index)}
-                    activeOpacity={0.7}
+                    style={styles.gearButton}
+                    onPress={() => {
+                      setNovaMetaBaseInput(metaDiariaBase.toString());
+                      setModalMetaBaseAberto(true);
+                    }}
                   >
-                    {/* Exibe o percentual amortizado no topo de cada dia */}
-                    <Text
-                      style={[
-                        styles.barTopValue,
-                        isSelected && { color: '#FFFFFF', fontWeight: 'bold' },
-                        item.percentual === 100 && { color: '#00E676' },
-                      ]}
-                    >
-                      {item.percentual > 0 ? `${item.percentual}%` : '0%'}
-                    </Text>
-
-                    {/* Trilho da Barra com Preenchimento Dinâmico */}
-                    <View style={styles.barTrack}>
-                      <View
-                        style={[
-                          styles.barFill,
-                          {
-                            height: `${alturaBarra}%`,
-                            backgroundColor: corBarra,
-                          },
-                          isSelected && styles.barFillSelected,
-                        ]}
-                      />
-                    </View>
-
-                    <Text
-                      style={[
-                        styles.dayLabel,
-                        isSelected && styles.dayLabelActive,
-                        item.isHoje && styles.dayLabelHoje,
-                      ]}
-                    >
-                      {item.sigla}
-                    </Text>
-
-                    {item.valor > 0 && (
-                      <Text style={styles.dayValorSub}>R${Math.round(item.valor)}</Text>
-                    )}
-
-                    {item.isHoje && <View style={styles.hojeIndicator} />}
+                    <Text style={styles.gearButtonText}>⚙️ Meta: R$ {metaDiariaBase.toFixed(0)}</Text>
                   </TouchableOpacity>
-                );
-              })}
-            </View>
+                </View>
 
-            <Text style={styles.chartLegend}>
-              Barras mostram o % amortizado de cada dia • Azul = Adiantado
-            </Text>
-          </View>
+                <Text style={styles.totalAmountText}>
+                  R$ {totalSemana.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </Text>
 
-          {/* DIVISOR */}
-          <View style={styles.horizontalDivider} />
+                {/* SUB-DESTAQUE: DIA SELECIONADO & BOTÃO LANÇAR */}
+                <View style={styles.selectedDayRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.selectedDayLabel}>{diaSelecionado.diaCompleto}:</Text>
+                    <Text style={styles.selectedDayValue}>
+                      {diaSelecionado.valor > 0
+                        ? `Fez R$ ${diaSelecionado.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                        : 'Sem ganho trabalhado'}
+                    </Text>
+                    <Text style={styles.selectedDayMetaInfo}>
+                      Status: {diaSelecionado.detalheAmortizacao}
+                    </Text>
+                  </View>
 
-          {/* CARD DE AMORTIZAÇÃO (PROGRESSO DA SEMANA POR FASES) */}
-          <View style={styles.amortizacaoCard}>
-            <View style={styles.amortizacaoHeader}>
-              <Text style={styles.amortizacaoTitle}>⚡ Regra Amortiza</Text>
-              <Text style={styles.amortizacaoBadge}>
-                {diasAmortizadosCompletos}/7 Dias Pagos
-              </Text>
-            </View>
-
-            {/* Destaque da Semana */}
-            <View style={{ marginVertical: 8 }}>
-              <Text style={styles.amortizacaoSubHeader}>
-                Progresso Semanal (Meta: R$ {metaTotalSemana.toFixed(2)}):
-              </Text>
-              <Text style={styles.amortizacaoAmount}>
-                R$ {totalCobertoSemana.toFixed(2)} cobertos
-              </Text>
-            </View>
-
-            {/* Barra de Progresso Total da Semana */}
-            <View style={styles.progressContainer}>
-              <View style={styles.progressTrack}>
-                <View
-                  style={[
-                    styles.progressFill,
-                    { width: `${Math.min(100, Math.round((totalCobertoSemana / metaTotalSemana) * 100))}%` },
-                  ]}
-                />
+                  <TouchableOpacity
+                    style={styles.btnEditarGanho}
+                    onPress={() => abrirModalParaDia(diaSelecionadoIdx)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.btnEditarGanhoTexto}>
+                      {diaSelecionado.valor > 0 ? '+ Adicionar' : '+ Inserir'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-              <Text style={styles.progressText}>
-                {Math.round((totalCobertoSemana / metaTotalSemana) * 100)}% da semana concluída
-              </Text>
-            </View>
 
-            {/* Detalhamento do Dia Selecionado */}
-            <View style={styles.impactoContainer}>
-              <Text style={styles.impactoTitulo}>
-                📅 {diaSelecionado.diaCompleto}:
-              </Text>
-              <Text style={styles.impactoValor}>
-                Fez: <Text style={{ color: '#00E676', fontWeight: 'bold' }}>R$ {diaSelecionado.valor.toFixed(2)}</Text> • Meta Base: R$ {metaDiariaBase.toFixed(2)}
-              </Text>
-              <Text style={styles.impactoExplicacao}>
-                Status: <Text style={{ color: '#F8FAFC', fontWeight: 'bold' }}>{diaSelecionado.detalheAmortizacao}</Text>
-              </Text>
+              {/* GRÁFICO DE BARRAS DE AMORTIZAÇÃO POR FASES */}
+              <View style={styles.chartContainer}>
+                <View style={styles.barsRow}>
+                  {diasSemana.map((item, index) => {
+                    const isSelected = index === diaSelecionadoIdx;
+                    const alturaBarra = Math.max(10, item.percentual);
+
+                    let corBarra = '#334155';
+                    if (item.statusAmortizacao === 'atingida') corBarra = '#00E676';
+                    else if (item.statusAmortizacao === 'adiantada') corBarra = '#38BDF8';
+                    else if (item.statusAmortizacao === 'parcial') corBarra = '#FBBF24';
+
+                    return (
+                      <TouchableOpacity
+                        key={index}
+                        style={styles.barColumn}
+                        onPress={() => setDiaSelecionadoIdx(index)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.barTopValue,
+                            isSelected && { color: '#FFFFFF', fontWeight: 'bold' },
+                            item.percentual === 100 && { color: '#00E676' },
+                          ]}
+                        >
+                          {item.percentual > 0 ? `${item.percentual}%` : '0%'}
+                        </Text>
+
+                        <View style={styles.barTrack}>
+                          <View
+                            style={[
+                              styles.barFill,
+                              {
+                                height: `${alturaBarra}%`,
+                                backgroundColor: corBarra,
+                              },
+                              isSelected && styles.barFillSelected,
+                            ]}
+                          />
+                        </View>
+
+                        <Text
+                          style={[
+                            styles.dayLabel,
+                            isSelected && styles.dayLabelActive,
+                            item.isHoje && styles.dayLabelHoje,
+                          ]}
+                        >
+                          {item.sigla}
+                        </Text>
+
+                        {item.valor > 0 && (
+                          <Text style={styles.dayValorSub}>R${Math.round(item.valor)}</Text>
+                        )}
+
+                        {item.isHoje && <View style={styles.hojeIndicator} />}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                <Text style={styles.chartLegend}>
+                  Barras mostram o % amortizado de cada dia • Azul = Adiantado
+                </Text>
+              </View>
+
+              <View style={styles.horizontalDivider} />
+
+              {/* CARD DE AMORTIZAÇÃO OPERACIONAL */}
+              <View style={styles.amortizacaoCard}>
+                <View style={styles.amortizacaoHeader}>
+                  <Text style={styles.amortizacaoTitle}>⚡ Regra Amortiza</Text>
+                  <Text style={styles.amortizacaoBadge}>
+                    {diasAmortizadosCompletos}/7 Dias Pagos
+                  </Text>
+                </View>
+
+                <View style={{ marginVertical: 8 }}>
+                  <Text style={styles.amortizacaoSubHeader}>
+                    Progresso Semanal (Meta: R$ {metaTotalSemana.toFixed(2)}):
+                  </Text>
+                  <Text style={styles.amortizacaoAmount}>
+                    R$ {totalCobertoSemana.toFixed(2)} cobertos
+                  </Text>
+                </View>
+
+                <View style={styles.progressContainer}>
+                  <View style={styles.progressTrack}>
+                    <View
+                      style={[
+                        styles.progressFill,
+                        { width: `${Math.min(100, Math.round((totalCobertoSemana / metaTotalSemana) * 100))}%` },
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.progressText}>
+                    {Math.round((totalCobertoSemana / metaTotalSemana) * 100)}% da semana concluída
+                  </Text>
+                </View>
+
+                <View style={styles.impactoContainer}>
+                  <Text style={styles.impactoTitulo}>
+                    📅 {diaSelecionado.diaCompleto}:
+                  </Text>
+                  <Text style={styles.impactoValor}>
+                    Fez: <Text style={{ color: '#00E676', fontWeight: 'bold' }}>R$ {diaSelecionado.valor.toFixed(2)}</Text> • Meta Base: R$ {metaDiariaBase.toFixed(2)}
+                  </Text>
+                  <Text style={styles.impactoExplicacao}>
+                    Status: <Text style={{ color: '#F8FAFC', fontWeight: 'bold' }}>{diaSelecionado.detalheAmortizacao}</Text>
+                  </Text>
+                </View>
+              </View>
+            </>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════════════════
+              TELA 2: CARTEIRA (VISÃO MACRO DE CONTROLE: GANHOS & DÍVIDAS)
+              ══════════════════════════════════════════════════════════════════════ */}
+          {telaAtiva === 'carteira' && (
+            <View style={styles.carteiraContainer}>
+              {/* ─── BLOCO 1: GANHOS MACRO ───────────────────────────────────── */}
+              <Text style={styles.secaoMacroTitulo}>💼 Visão Macro de Ganhos</Text>
+
+              {/* CARDS LADO A LADO: SEMANA ATUAL VS MÊS TOTAL */}
+              <View style={styles.macroCardsRow}>
+                <View style={styles.macroCardItem}>
+                  <Text style={styles.macroCardLabel}>SEMANA ATUAL</Text>
+                  <Text style={styles.macroCardValorDestaque}>
+                    R$ {totalSemana.toFixed(2)}
+                  </Text>
+                  <Text style={styles.macroCardSub}>
+                    {diasAmortizadosCompletos} de 7 metas batidas
+                  </Text>
+                </View>
+
+                <View style={styles.macroCardItem}>
+                  <Text style={styles.macroCardLabel}>TOTAL DO MÊS</Text>
+                  <Text style={[styles.macroCardValorDestaque, { color: '#38BDF8' }]}>
+                    R$ {totalMes.toFixed(2)}
+                  </Text>
+                  <Text style={styles.macroCardSub}>
+                    Todas as semanas somadas
+                  </Text>
+                </View>
+              </View>
+
+              {/* SELETOR DE OUTRAS SEMANAS DO MÊS */}
+              <Text style={styles.subSecaoTitulo}>Navegar nas Semanas do Mês:</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.semanasScrollRow}
+              >
+                {semanasMes.map((s, idx) => {
+                  const ativa = idx === semanaMesSelecionadaIdx;
+                  return (
+                    <TouchableOpacity
+                      key={idx}
+                      style={[styles.semanaCardPill, ativa && styles.semanaCardPillAtiva]}
+                      onPress={() => setSemanaMesSelecionadaIdx(idx)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={[styles.semanaPillNome, ativa && styles.semanaPillNomeAtiva]}>
+                        {s.rotulo}
+                        {s.isAtual ? ' ★' : ''}
+                      </Text>
+                      <Text style={[styles.semanaPillValor, ativa && styles.semanaPillValorAtiva]}>
+                        R$ {s.totalGanhos.toFixed(2)}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <View style={styles.detalheSemanaCard}>
+                <Text style={styles.detalheSemanaTitulo}>
+                  Detalhe da {semanaSelecionadaInfo?.rotulo}:
+                </Text>
+                <Text style={styles.detalheSemanaGanhos}>
+                  Total arrecadado: <Text style={{ color: '#00E676', fontWeight: 'bold' }}>R$ {semanaSelecionadaInfo?.totalGanhos.toFixed(2)}</Text>
+                </Text>
+              </View>
+
+              <View style={styles.horizontalDivider} />
+
+              {/* ─── BLOCO 2: GESTÃO DE DÍVIDAS MACRO ─────────────────────────── */}
+              <Text style={styles.secaoMacroTitulo}>📉 Gestão de Dívidas & Custos</Text>
+
+              {/* CARD DESTAQUE: DÍVIDA ANUAL PROJETADA (CÁLCULO AUTOMÁTICO) */}
+              <View style={styles.cardDividaAnual}>
+                <View style={styles.dividaAnualHeader}>
+                  <Text style={styles.dividaAnualTitulo}>⚡ Dívida Anual Projetada</Text>
+                  <Text style={styles.dividaAnualBadge}>Automático 365 dias</Text>
+                </View>
+
+                <Text style={styles.dividaAnualValor}>
+                  R$ {resumoDividas.totalAnualCalculado.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </Text>
+                <Text style={styles.dividaAnualExplicacao}>
+                  Calculada com base nas suas dívidas diárias (x365), mensais (x12) e imprevistos acumulados.
+                </Text>
+
+                <View style={styles.dividaAnualBreakdownRow}>
+                  <View style={styles.breakdownItem}>
+                    <Text style={styles.breakdownItemLabel}>Diárias/Ano</Text>
+                    <Text style={styles.breakdownItemVal}>R$ {(resumoDividas.totalDiario * 365).toFixed(0)}</Text>
+                  </View>
+                  <View style={styles.breakdownItem}>
+                    <Text style={styles.breakdownItemLabel}>Mensais/Ano</Text>
+                    <Text style={styles.breakdownItemVal}>R$ {(resumoDividas.totalMensal * 12).toFixed(0)}</Text>
+                  </View>
+                  <View style={styles.breakdownItem}>
+                    <Text style={styles.breakdownItemLabel}>Imprevistos</Text>
+                    <Text style={styles.breakdownItemVal}>R$ {resumoDividas.totalImprevistosAnualizado.toFixed(0)}</Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* 1. DÍVIDAS DIÁRIAS (GASTOS DIÁRIOS) */}
+              <View style={styles.categoriaDividaBox}>
+                <View style={styles.categoriaDividaHeader}>
+                  <View>
+                    <Text style={styles.categoriaDividaTitulo}>☀️ Dívidas Diárias (Gasto Diário)</Text>
+                    <Text style={styles.categoriaDividaTotal}>
+                      R$ {resumoDividas.totalDiario.toFixed(2)} / dia
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.btnAddDivida}
+                    onPress={() => handleAbrirNovaDivida('diaria')}
+                  >
+                    <Text style={styles.btnAddDividaTexto}>+ Adicionar</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {dividas.filter(d => d.tipo === 'diaria').length === 0 ? (
+                  <Text style={styles.dividaVaziaTexto}>Nenhum gasto diário registrado (ex: combustível, almoço).</Text>
+                ) : (
+                  dividas.filter(d => d.tipo === 'diaria').map(item => (
+                    <View key={item.id} style={styles.itemDividaRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.itemDividaDesc}>{item.descricao}</Text>
+                        <Text style={styles.itemDividaSub}>Impacto: R$ {(item.valor * 365).toFixed(2)}/ano</Text>
+                      </View>
+                      <Text style={styles.itemDividaValor}>R$ {item.valor.toFixed(2)}/dia</Text>
+                      <TouchableOpacity
+                        style={styles.btnExcluirDivida}
+                        onPress={() => handleExcluirDivida(item.id, item.descricao)}
+                      >
+                        <Text style={styles.btnExcluirDividaTexto}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))
+                )}
+              </View>
+
+              {/* 2. DÍVIDAS MENSAIS (CUSTOS FIXOS) */}
+              <View style={styles.categoriaDividaBox}>
+                <View style={styles.categoriaDividaHeader}>
+                  <View>
+                    <Text style={styles.categoriaDividaTitulo}>📅 Dívidas Mensais (Custos Fixos)</Text>
+                    <Text style={styles.categoriaDividaTotal}>
+                      R$ {resumoDividas.totalMensal.toFixed(2)} / mês
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.btnAddDivida}
+                    onPress={() => handleAbrirNovaDivida('mensal')}
+                  >
+                    <Text style={styles.btnAddDividaTexto}>+ Adicionar</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {dividas.filter(d => d.tipo === 'mensal').length === 0 ? (
+                  <Text style={styles.dividaVaziaTexto}>Nenhuma dívida mensal registrada (ex: aluguel carro, seguro, parcela).</Text>
+                ) : (
+                  dividas.filter(d => d.tipo === 'mensal').map(item => (
+                    <View key={item.id} style={styles.itemDividaRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.itemDividaDesc}>{item.descricao}</Text>
+                        <Text style={styles.itemDividaSub}>Impacto: R$ {(item.valor * 12).toFixed(2)}/ano</Text>
+                      </View>
+                      <Text style={styles.itemDividaValor}>R$ {item.valor.toFixed(2)}/mês</Text>
+                      <TouchableOpacity
+                        style={styles.btnExcluirDivida}
+                        onPress={() => handleExcluirDivida(item.id, item.descricao)}
+                      >
+                        <Text style={styles.btnExcluirDividaTexto}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))
+                )}
+              </View>
+
+              {/* 3. DÍVIDAS IMPREVISTAS (CONFIGURÁVEL) */}
+              <View style={styles.categoriaDividaBox}>
+                <View style={styles.categoriaDividaHeader}>
+                  <View>
+                    <Text style={styles.categoriaDividaTitulo}>🚨 Dívidas Imprevistas</Text>
+                    <Text style={styles.categoriaDividaTotal}>
+                      Impacto anual: R$ {resumoDividas.totalImprevistosAnualizado.toFixed(2)}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.btnAddDivida}
+                    onPress={() => handleAbrirNovaDivida('imprevista')}
+                  >
+                    <Text style={styles.btnAddDividaTexto}>+ Lançar</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {dividas.filter(d => d.tipo === 'imprevista').length === 0 ? (
+                  <Text style={styles.dividaVaziaTexto}>Nenhum imprevisto registrado (ex: manutenção inesperada, multa).</Text>
+                ) : (
+                  dividas.filter(d => d.tipo === 'imprevista').map(item => (
+                    <View key={item.id} style={styles.itemDividaRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.itemDividaDesc}>{item.descricao}</Text>
+                        <Text style={styles.itemDividaSub}>
+                          Frequência: {item.frequenciaImprevisto === 'diaria' ? 'Diária' : item.frequenciaImprevisto === 'mensal' ? 'Mensal' : 'Anual / Pontual'}
+                        </Text>
+                      </View>
+                      <Text style={[styles.itemDividaValor, { color: '#F87171' }]}>R$ {item.valor.toFixed(2)}</Text>
+                      <TouchableOpacity
+                        style={styles.btnExcluirDivida}
+                        onPress={() => handleExcluirDivida(item.id, item.descricao)}
+                      >
+                        <Text style={styles.btnExcluirDividaTexto}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))
+                )}
+              </View>
             </View>
-          </View>
+          )}
 
           {/* HISTÓRICO SUPABASE */}
           <View style={styles.bancoSection}>
-            <Text style={styles.sectionHeaderTitle}>Histórico de Amortizações</Text>
+            <Text style={styles.sectionHeaderTitle}>Histórico de Registros</Text>
 
             {metasBanco.length === 0 ? (
-              <Text style={styles.emptyText}>Ganhos salvos localmente no seu aparelho.</Text>
+              <Text style={styles.emptyText}>Ganhos e metas salvos no seu aparelho.</Text>
             ) : (
               metasBanco.map((item) => (
                 <View key={item.id} style={styles.metaRowCard}>
@@ -652,16 +1022,122 @@ export default function App() {
           </View>
         </ScrollView>
 
-        {/* BOTÃO FLUTUANTE (FAB) COM ESCOLHA */}
-        <TouchableOpacity
-          style={styles.fabButton}
-          onPress={() => setModalEscolhaFABAberto(true)}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.fabIcon}>+</Text>
-        </TouchableOpacity>
+        {/* ══════════════════════════════════════════════════════════════════════
+            BARRA DE NAVEGAÇÃO INFERIOR (BOTTOM TABS)
+            ══════════════════════════════════════════════════════════════════════ */}
+        <View style={styles.bottomTabBar}>
+          <TouchableOpacity
+            style={[styles.tabBarItem, telaAtiva === 'dashboard' && styles.tabBarItemAtivo]}
+            onPress={() => setTelaAtiva('dashboard')}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.tabBarItemIcon, telaAtiva === 'dashboard' && styles.tabBarItemIconAtivo]}>
+              📊
+            </Text>
+            <Text style={[styles.tabBarItemTexto, telaAtiva === 'dashboard' && styles.tabBarItemTextoAtivo]}>
+              Semana
+            </Text>
+          </TouchableOpacity>
 
-        {/* MODAL 1: MENU SANDUÍCHE (DRAWER LATERAL) */}
+          {/* FAB FLUTUANTE CENTRAL DA CÂMERA / GANHO */}
+          <TouchableOpacity
+            style={styles.tabBarFab}
+            onPress={() => setModalEscolhaFABAberto(true)}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.tabBarFabIcon}>+</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.tabBarItem, telaAtiva === 'carteira' && styles.tabBarItemAtivo]}
+            onPress={() => setTelaAtiva('carteira')}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.tabBarItemIcon, telaAtiva === 'carteira' && styles.tabBarItemIconAtivo]}>
+              💼
+            </Text>
+            <Text style={[styles.tabBarItemTexto, telaAtiva === 'carteira' && styles.tabBarItemTextoAtivo]}>
+              Carteira
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* MODAL: LANÇAMENTO DE DÍVIDAS (CARTEIRA) */}
+        <Modal
+          visible={modalDividaAberto}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setModalDividaAberto(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.bottomSheetContainer}>
+              <View style={styles.bottomSheetHandle} />
+
+              <Text style={styles.modalTitleText}>
+                {tipoDividaNovo === 'diaria' ? 'Cadastrar Gasto Diário' : tipoDividaNovo === 'mensal' ? 'Cadastrar Dívida Mensal' : 'Lançar Dívida Imprevista'}
+              </Text>
+              <Text style={styles.modalSubText}>
+                A dívida anual projetada atualizará automaticamente.
+              </Text>
+
+              {/* SELETOR SE FOR IMPREVISTA */}
+              {tipoDividaNovo === 'imprevista' && (
+                <View style={{ marginBottom: 14 }}>
+                  <Text style={styles.inputLabel}>Frequência do Imprevisto:</Text>
+                  <View style={styles.diaSelectorRow}>
+                    {(['diaria', 'mensal', 'anual'] as const).map(freq => (
+                      <TouchableOpacity
+                        key={freq}
+                        style={[styles.diaPill, frequenciaImprevistoNovo === freq && styles.diaPillAtivo]}
+                        onPress={() => setFrequenciaImprevistoNovo(freq)}
+                      >
+                        <Text style={[styles.diaPillTexto, frequenciaImprevistoNovo === freq && styles.diaPillTextoAtivo]}>
+                          {freq === 'diaria' ? 'Diária' : freq === 'mensal' ? 'Mensal' : 'Anual / Única'}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              <Text style={styles.inputLabel}>Descrição da Dívida / Gasto:</Text>
+              <TextInput
+                style={styles.modalInput}
+                placeholder={tipoDividaNovo === 'diaria' ? 'Ex: Combustível, Almoço' : tipoDividaNovo === 'mensal' ? 'Ex: Parcela do Carro, Seguro' : 'Ex: Manutenção inesperada do pneu'}
+                placeholderTextColor="#64748B"
+                value={descricaoDividaInput}
+                onChangeText={setDescricaoDividaInput}
+                autoFocus
+              />
+
+              <Text style={styles.inputLabel}>Valor (R$):</Text>
+              <TextInput
+                style={styles.modalInputGrande}
+                keyboardType="numeric"
+                placeholder="0.00"
+                placeholderTextColor="#64748B"
+                value={valorDividaInput}
+                onChangeText={setValorDividaInput}
+              />
+
+              <TouchableOpacity
+                style={styles.primaryActionButton}
+                onPress={handleSalvarDivida}
+              >
+                <Text style={styles.primaryActionText}>Salvar Dívida</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.secondaryActionButton, { marginTop: 6, borderColor: 'transparent' }]}
+                onPress={() => setModalDividaAberto(false)}
+              >
+                <Text style={[styles.secondaryActionText, { color: '#64748B' }]}>Cancelar</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        {/* MODAL: MENU SANDUÍCHE (DRAWER LATERAL) */}
         <Modal
           visible={menuDrawerAberto}
           animationType="fade"
@@ -677,7 +1153,27 @@ export default function App() {
                 </TouchableOpacity>
               </View>
 
-              <Text style={styles.drawerSubtitle}>Gestão de Ganhos & Amortização</Text>
+              <Text style={styles.drawerSubtitle}>Gestão Operacional & Carteira Macro</Text>
+
+              <TouchableOpacity
+                style={styles.drawerItem}
+                onPress={() => {
+                  setMenuDrawerAberto(false);
+                  setTelaAtiva('dashboard');
+                }}
+              >
+                <Text style={styles.drawerItemText}>📊 Dashboard da Semana</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.drawerItem}
+                onPress={() => {
+                  setMenuDrawerAberto(false);
+                  setTelaAtiva('carteira');
+                }}
+              >
+                <Text style={styles.drawerItemText}>💼 Carteira & Controle Macro</Text>
+              </TouchableOpacity>
 
               <TouchableOpacity
                 style={styles.drawerItem}
@@ -700,27 +1196,14 @@ export default function App() {
                 <Text style={styles.drawerItemText}>🔄 Sincronizar Dados</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.drawerItem}
-                onPress={() => {
-                  setMenuDrawerAberto(false);
-                  Alert.alert(
-                    'Regra Amortiza',
-                    'Quando você faz mais do que a meta do dia, o excedente paga as metas dos dias seguintes!\nExemplo: meta 100, fez 250 -> Segunda (100%), Terça (100%), Quarta (50%).'
-                  );
-                }}
-              >
-                <Text style={styles.drawerItemText}>ℹ️ Como Funciona a Regra</Text>
-              </TouchableOpacity>
-
               <View style={styles.drawerFooter}>
-                <Text style={styles.drawerFooterText}>Amortiza v1.0.0 • On-Device</Text>
+                <Text style={styles.drawerFooterText}>Amortiza v1.2.0 • Offline-First</Text>
               </View>
             </View>
           </View>
         </Modal>
 
-        {/* MODAL 2: CONFIGURAR META BASE (LAYOUT 100% VISÍVEL) */}
+        {/* MODAL: CONFIGURAR META BASE */}
         <Modal
           visible={modalMetaBaseAberto}
           animationType="fade"
@@ -762,7 +1245,7 @@ export default function App() {
           </View>
         </Modal>
 
-        {/* MODAL 3: ESCOLHA AO CLICAR NO FAB (+) */}
+        {/* MODAL: ESCOLHA AO CLICAR NO FAB (+) */}
         <Modal
           visible={modalEscolhaFABAberto}
           animationType="fade"
@@ -802,7 +1285,7 @@ export default function App() {
           </View>
         </Modal>
 
-        {/* MODAL 4: LANÇAMENTO DIRETO (COM OPÇÃO DE SOMAR OU SUBSTITUIR) */}
+        {/* MODAL: LANÇAMENTO DIRETO DE GANHO */}
         <Modal
           animationType="slide"
           transparent={true}
@@ -813,16 +1296,14 @@ export default function App() {
             <View style={styles.bottomSheetContainer}>
               <View style={styles.bottomSheetHandle} />
 
-              {/* ESTADO 1: ANALISANDO OCR */}
               {analisandoOCR && (
                 <View style={styles.modalContentState}>
-                  <ActivityIndicator size="large" color="#00D26A" style={{ marginBottom: 16 }} />
+                  <ActivityIndicator size="large" color="#00E676" style={{ marginBottom: 16 }} />
                   <Text style={styles.modalTitleText}>Analisando captura de tela...</Text>
                   <Text style={styles.modalSubText}>Extraindo valores via OCR On-Device</Text>
                 </View>
               )}
 
-              {/* ESTADO 2: CONFIRMAÇÃO OCR */}
               {!analisandoOCR && ocrConfirmacaoPronta && (
                 <View style={styles.modalContentState}>
                   <View style={styles.badgeSuccess}>
@@ -840,7 +1321,7 @@ export default function App() {
                   {valorJaExistente > 0 && (
                     <TouchableOpacity
                       style={styles.primaryActionButton}
-                      onPress={() => handleExecutarSalvar('somar')}
+                      onPress={() => handleExecutarSalvarGanho('somar')}
                       disabled={salvando}
                     >
                       {salvando ? (
@@ -855,7 +1336,7 @@ export default function App() {
 
                   <TouchableOpacity
                     style={valorJaExistente > 0 ? styles.secondaryActionButton : styles.primaryActionButton}
-                    onPress={() => handleExecutarSalvar('substituir')}
+                    onPress={() => handleExecutarSalvarGanho('substituir')}
                     disabled={salvando}
                   >
                     <Text style={valorJaExistente > 0 ? styles.secondaryActionText : styles.primaryActionText}>
@@ -872,7 +1353,6 @@ export default function App() {
                 </View>
               )}
 
-              {/* ESTADO 3: INSERÇÃO MANUAL COM SELETOR DE DIA E SOMA INTELIGENTE */}
               {!analisandoOCR && !ocrConfirmacaoPronta && (
                 <View style={styles.modalContentState}>
                   <Text style={styles.modalTitleText}>Lançar Ganho</Text>
@@ -907,7 +1387,6 @@ export default function App() {
                     {diaLancamento.isHoje ? ' (Hoje)' : ''}
                   </Text>
 
-                  {/* Mostra o ganho que já existe para o usuário saber que vai somar */}
                   {valorJaExistente > 0 && (
                     <View style={styles.avisoAcumuloContainer}>
                       <Text style={styles.avisoAcumuloTexto}>
@@ -916,7 +1395,6 @@ export default function App() {
                     </View>
                   )}
 
-                  {/* CAMPO DE VALOR */}
                   <Text style={styles.inputLabel}>
                     {valorJaExistente > 0 ? 'Quanto quer adicionar a mais? (R$)' : 'Quanto você fez? (R$)'}
                   </Text>
@@ -930,7 +1408,6 @@ export default function App() {
                     autoFocus
                   />
 
-                  {/* ATALHOS RÁPIDOS */}
                   <View style={styles.atalhosValorRow}>
                     {[50, 100, 150, 200].map(v => (
                       <TouchableOpacity
@@ -949,12 +1426,11 @@ export default function App() {
                     </TouchableOpacity>
                   </View>
 
-                  {/* BOTÃO PRINCIPAL: SE JÁ EXISTE VALOR, SOMA! */}
                   {valorJaExistente > 0 && valorNovoNumerico > 0 ? (
                     <>
                       <TouchableOpacity
                         style={styles.primaryActionButton}
-                        onPress={() => handleExecutarSalvar('somar')}
+                        onPress={() => handleExecutarSalvarGanho('somar')}
                         disabled={salvando}
                       >
                         {salvando ? (
@@ -968,7 +1444,7 @@ export default function App() {
 
                       <TouchableOpacity
                         style={styles.secondaryActionButton}
-                        onPress={() => handleExecutarSalvar('substituir')}
+                        onPress={() => handleExecutarSalvarGanho('substituir')}
                         disabled={salvando}
                       >
                         <Text style={styles.secondaryActionText}>
@@ -979,7 +1455,7 @@ export default function App() {
                   ) : (
                     <TouchableOpacity
                       style={styles.primaryActionButton}
-                      onPress={() => handleExecutarSalvar(valorJaExistente > 0 ? 'substituir' : 'somar')}
+                      onPress={() => handleExecutarSalvarGanho(valorJaExistente > 0 ? 'substituir' : 'somar')}
                       disabled={salvando}
                     >
                       {salvando ? (
@@ -1041,6 +1517,16 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontSize: 18,
     fontWeight: 'bold',
+  },
+  headerTitleContainer: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  headerMainTitle: {
+    color: '#F8FAFC',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: -0.3,
   },
   periodDropdown: {
     backgroundColor: '#1E293B',
@@ -1111,7 +1597,7 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   selectedDayValue: {
-    color: '#00D26A',
+    color: '#00E676',
     fontSize: 16,
     fontWeight: '700',
   },
@@ -1126,10 +1612,10 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#00D26A',
+    borderColor: '#00E676',
   },
   btnEditarGanhoTexto: {
-    color: '#00D26A',
+    color: '#00E676',
     fontSize: 13,
     fontWeight: '700',
   },
@@ -1187,7 +1673,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   dayLabelHoje: {
-    color: '#00D26A',
+    color: '#00E676',
   },
   dayValorSub: {
     color: '#94A3B8',
@@ -1198,7 +1684,7 @@ const styles = StyleSheet.create({
     width: 4,
     height: 4,
     borderRadius: 2,
-    backgroundColor: '#00D26A',
+    backgroundColor: '#00E676',
     marginTop: 2,
   },
   chartLegend: {
@@ -1222,7 +1708,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 20,
     borderLeftWidth: 4,
-    borderLeftColor: '#00D26A',
+    borderLeftColor: '#00E676',
     borderWidth: 1,
     borderColor: '#1E293B',
   },
@@ -1238,7 +1724,7 @@ const styles = StyleSheet.create({
   },
   amortizacaoBadge: {
     backgroundColor: 'rgba(0, 210, 106, 0.15)',
-    color: '#00D26A',
+    color: '#00E676',
     fontSize: 11,
     fontWeight: '700',
     paddingHorizontal: 8,
@@ -1268,7 +1754,7 @@ const styles = StyleSheet.create({
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#00D26A',
+    backgroundColor: '#00E676',
     borderRadius: 4,
   },
   progressText: {
@@ -1298,6 +1784,255 @@ const styles = StyleSheet.create({
     color: '#64748B',
     fontSize: 12,
     lineHeight: 18,
+  },
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // ESTILOS DA CARTEIRA & VISÃO MACRO
+  // ════════════════════════════════════════════════════════════════════════════
+  carteiraContainer: {
+    marginTop: 10,
+  },
+  secaoMacroTitulo: {
+    color: '#F8FAFC',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 14,
+    letterSpacing: -0.3,
+  },
+  subSecaoTitulo: {
+    color: '#94A3B8',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 14,
+    marginBottom: 8,
+  },
+  macroCardsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 6,
+  },
+  macroCardItem: {
+    flex: 1,
+    backgroundColor: '#131C2E',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  macroCardLabel: {
+    color: '#94A3B8',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  macroCardValorDestaque: {
+    color: '#00E676',
+    fontSize: 24,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  macroCardSub: {
+    color: '#64748B',
+    fontSize: 11,
+  },
+  semanasScrollRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingVertical: 6,
+  },
+  semanaCardPill: {
+    backgroundColor: '#131C2E',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    minWidth: 120,
+  },
+  semanaCardPillAtiva: {
+    borderColor: '#00E676',
+    backgroundColor: '#1E293B',
+  },
+  semanaPillNome: {
+    color: '#94A3B8',
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  semanaPillNomeAtiva: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  semanaPillValor: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  semanaPillValorAtiva: {
+    color: '#00E676',
+  },
+  detalheSemanaCard: {
+    backgroundColor: '#0F172A',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  detalheSemanaTitulo: {
+    color: '#94A3B8',
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  detalheSemanaGanhos: {
+    color: '#F8FAFC',
+    fontSize: 13,
+  },
+
+  // CARD DESTAQUE DÍVIDA ANUAL
+  cardDividaAnual: {
+    backgroundColor: '#1E1B2E',
+    borderRadius: 18,
+    padding: 20,
+    borderLeftWidth: 4,
+    borderLeftColor: '#F87171',
+    borderWidth: 1,
+    borderColor: '#373052',
+    marginBottom: 20,
+  },
+  dividaAnualHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  dividaAnualTitulo: {
+    color: '#F8FAFC',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  dividaAnualBadge: {
+    backgroundColor: 'rgba(248, 113, 113, 0.15)',
+    color: '#F87171',
+    fontSize: 10,
+    fontWeight: '700',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  dividaAnualValor: {
+    color: '#FFFFFF',
+    fontSize: 34,
+    fontWeight: '800',
+    marginVertical: 4,
+    letterSpacing: -0.5,
+  },
+  dividaAnualExplicacao: {
+    color: '#94A3B8',
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  dividaAnualBreakdownRow: {
+    flexDirection: 'row',
+    borderTopWidth: 1,
+    borderTopColor: '#2D2845',
+    paddingTop: 10,
+  },
+  breakdownItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  breakdownItemLabel: {
+    color: '#94A3B8',
+    fontSize: 10,
+    marginBottom: 2,
+  },
+  breakdownItemVal: {
+    color: '#F87171',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+
+  // CATEGORIAS DE DÍVIDAS
+  categoriaDividaBox: {
+    backgroundColor: '#131C2E',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  categoriaDividaHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  categoriaDividaTitulo: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  categoriaDividaTotal: {
+    color: '#00E676',
+    fontSize: 15,
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  btnAddDivida: {
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+  },
+  btnAddDividaTexto: {
+    color: '#38BDF8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  dividaVaziaTexto: {
+    color: '#64748B',
+    fontSize: 12,
+    fontStyle: 'italic',
+    paddingVertical: 6,
+  },
+  itemDividaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#1E293B',
+  },
+  itemDividaDesc: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  itemDividaSub: {
+    color: '#64748B',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  itemDividaValor: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    fontWeight: '700',
+    marginRight: 12,
+  },
+  btnExcluirDivida: {
+    padding: 6,
+    backgroundColor: '#1E293B',
+    borderRadius: 6,
+  },
+  btnExcluirDividaTexto: {
+    color: '#EF4444',
+    fontSize: 12,
+    fontWeight: 'bold',
   },
 
   // HISTÓRICO
@@ -1355,25 +2090,64 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
 
-  // FAB
-  fabButton: {
+  // ════════════════════════════════════════════════════════════════════════════
+  // BARRA DE NAVEGAÇÃO INFERIOR (BOTTOM TABS)
+  // ════════════════════════════════════════════════════════════════════════════
+  bottomTabBar: {
     position: 'absolute',
-    bottom: 28,
-    right: 24,
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#00D26A',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 72,
+    backgroundColor: '#0F172A',
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: '#1E293B',
+    paddingBottom: 8,
+    paddingHorizontal: 20,
+  },
+  tabBarItem: {
     alignItems: 'center',
     justifyContent: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+  },
+  tabBarItemAtivo: {},
+  tabBarItemIcon: {
+    fontSize: 22,
+    opacity: 0.5,
+  },
+  tabBarItemIconAtivo: {
+    opacity: 1,
+  },
+  tabBarItemTexto: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  tabBarItemTextoAtivo: {
+    color: '#00E676',
+    fontWeight: '800',
+  },
+  tabBarFab: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: '#00E676',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: -28,
     elevation: 8,
-    shadowColor: '#00D26A',
+    shadowColor: '#00E676',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.4,
     shadowRadius: 8,
   },
-  fabIcon: {
-    fontSize: 32,
+  tabBarFabIcon: {
+    fontSize: 30,
     fontWeight: 'bold',
     color: '#0A0F1D',
     marginTop: -2,
@@ -1560,7 +2334,6 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
-  // AVISO DE GANHO JÁ EXISTENTE
   avisoAcumuloContainer: {
     backgroundColor: 'rgba(0, 210, 106, 0.1)',
     paddingVertical: 6,
@@ -1575,7 +2348,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
 
-  // CAMPO GIGANTE DE VALOR
   modalInputGrande: {
     backgroundColor: '#0A0F1D',
     width: '100%',
@@ -1591,7 +2363,6 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
 
-  // ATALHOS RÁPIDOS
   atalhosValorRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1658,7 +2429,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 16,
     marginBottom: 16,
   },
   modalButtonsRow: {
