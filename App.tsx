@@ -1,7 +1,6 @@
-// Aplicativo Amortiza - Dashboard Estilo Uber com Amortização e OCR On-Device
+// Aplicativo Amortiza - Regra de Amortização por Fases da Semana e OCR On-Device
 // Documentação React Native: https://reactnative.dev/docs/getting-started
 // Documentação Safe Area Context: https://github.com/AppAndFlow/react-native-safe-area-context
-// Documentação AsyncStorage: https://react-native-async-storage.github.io/async-storage/
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -27,13 +26,12 @@ import {
   carregarGanhosLocais,
   salvarMetaBaseLocal,
   carregarMetaBaseLocal,
-  RegistroGanhoLocal,
 } from './src/services/storage';
 import { MetaNumerica, GanhoDia } from './src/types';
 
 const { width } = Dimensions.get('window');
 
-const META_DIARIA_PADRAO = 200.00;
+const META_DIARIA_PADRAO = 100.00;
 
 // ─── UTILITÁRIOS DE DATA AUTOMÁTICA DO CELULAR ────────────────────────────────
 function toISOLocal(date: Date): string {
@@ -79,9 +77,11 @@ function gerarEstruturaSemana(hoje: Date): GanhoDia[] {
       diaCompleto: formatarDiaCompleto(dia),
       sigla: SIGLAS_DIAS[i],
       valor: 0,
-      metaDoDia: META_DIARIA_PADRAO,
-      saldoDia: 0,
+      valorCoberto: 0,
+      metaBase: META_DIARIA_PADRAO,
       percentual: 0,
+      statusAmortizacao: 'pendente',
+      detalheAmortizacao: '0%',
       isHoje: dataISO === hojeISO,
       temRegistro: false,
     };
@@ -93,36 +93,70 @@ function formatarPeriodo(dias: GanhoDia[]): string {
   return `${dias[0].dataExibicao} – ${dias[6].dataExibicao}`;
 }
 
-// ─── MOTOR DE CÁLCULO DE AMORTIZAÇÃO ──────────────────────────────────────────
+// ─── VERDADEIRA REGRA DE AMORTIZAÇÃO POR FASES / CASCATA ──────────────────────
 /**
- * Regra Amortiza:
- * Segunda começa com a meta base.
- * Se o ganho for menor que a meta (ex: meta 200, fez 100), o déficit (+100) acumula para Terça (meta 300).
- * Se o ganho for maior que a meta (ex: meta 200, fez 250), o superávit (-50) amortiza Terça (meta 150).
+ * Exemplo real:
+ * Meta diária = 100.
+ * Lançamento de 250 na Segunda:
+ * - Segunda = 100% coberta (100) -> sobram 150
+ * - Terça   = 100% coberta (100 amortizados por Segunda) -> sobram 50
+ * - Quarta  = 50% coberta (50 amortizados por Segunda) -> sobram 0
+ * - Quinta em diante = 0%
  */
-function aplicarAmortizacaoSemana(dias: GanhoDia[], metaBase: number): GanhoDia[] {
-  let saldoAcumulado = 0;
+function calcularAmortizacaoPorFases(dias: GanhoDia[], metaBase: number): GanhoDia[] {
+  let saldoCascata = 0;
+  let diaOrigemExcedente = '';
 
   return dias.map((dia) => {
-    // Meta deste dia = meta base + déficit/superávit herdado do dia anterior
-    const metaDoDia = Math.max(0, metaBase + saldoAcumulado);
+    const ganhoProprio = dia.valor || 0;
+    const totalDisponivel = ganhoProprio + saldoCascata;
 
-    // Se este dia tem registro de ganho salvo:
-    if (dia.temRegistro) {
-      // Déficit se faltou, Superávit se sobrou
-      saldoAcumulado = metaDoDia - dia.valor;
+    let valorCoberto = 0;
+    let status: 'atingida' | 'parcial' | 'pendente' | 'adiantada' = 'pendente';
+    let detalhe = '';
+
+    if (totalDisponivel >= metaBase) {
+      valorCoberto = metaBase;
+      const novoExcedente = totalDisponivel - metaBase;
+
+      if (ganhoProprio >= metaBase) {
+        status = 'atingida';
+        detalhe = '100% ✓';
+        if (novoExcedente > 0) {
+          diaOrigemExcedente = dia.sigla;
+        }
+      } else {
+        status = 'adiantada';
+        detalhe = `100% ✓ (Amortizado por ${diaOrigemExcedente})`;
+      }
+
+      saldoCascata = novoExcedente;
+    } else if (totalDisponivel > 0) {
+      valorCoberto = totalDisponivel;
+      const faltam = metaBase - totalDisponivel;
+      status = 'parcial';
+      if (ganhoProprio > 0 && saldoCascata === 0) {
+        detalhe = `${Math.round((valorCoberto / metaBase) * 100)}% (Faltam R$ ${faltam.toFixed(0)})`;
+      } else {
+        detalhe = `${Math.round((valorCoberto / metaBase) * 100)}% (Amortizado por ${diaOrigemExcedente})`;
+      }
+      saldoCascata = 0;
+    } else {
+      valorCoberto = 0;
+      status = 'pendente';
+      detalhe = '0%';
+      saldoCascata = 0;
     }
 
-    const saldoDia = metaDoDia - dia.valor;
-    const percentual = metaDoDia > 0
-      ? Math.min(200, Math.round((dia.valor / metaDoDia) * 100))
-      : (dia.valor > 0 ? 100 : 0);
+    const percentual = metaBase > 0 ? Math.min(100, Math.round((valorCoberto / metaBase) * 100)) : 0;
 
     return {
       ...dia,
-      metaDoDia,
-      saldoDia,
+      metaBase,
+      valorCoberto,
       percentual,
+      statusAmortizacao: status,
+      detalheAmortizacao: detalhe,
     };
   });
 }
@@ -135,10 +169,10 @@ export default function App() {
   // Meta Base Diária (salva no celular)
   const [metaDiariaBase, setMetaDiariaBase] = useState<number>(META_DIARIA_PADRAO);
 
-  // Semana completa com cálculos dinâmicos
+  // Semana completa com cálculos em cascata
   const [diasSemana, setDiasSemana] = useState<GanhoDia[]>(() => {
     const estrutura = gerarEstruturaSemana(hoje);
-    return aplicarAmortizacaoSemana(estrutura, META_DIARIA_PADRAO);
+    return calcularAmortizacaoPorFases(estrutura, META_DIARIA_PADRAO);
   });
 
   const [diaSelecionadoIdx, setDiaSelecionadoIdx] = useState<number>(() => {
@@ -150,13 +184,13 @@ export default function App() {
   // Modais de Navegação e Menu
   const [menuDrawerAberto, setMenuDrawerAberto] = useState<boolean>(false);
   const [modalMetaBaseAberto, setModalMetaBaseAberto] = useState<boolean>(false);
-  const [novaMetaBaseInput, setNovaMetaBaseInput] = useState<string>('200');
+  const [novaMetaBaseInput, setNovaMetaBaseInput] = useState<string>('100');
   const [modalEscolhaFABAberto, setModalEscolhaFABAberto] = useState<boolean>(false);
 
   // Modal de Lançamento
   const [modalVisible, setModalVisible] = useState<boolean>(false);
   const [diaLancamentoIdx, setDiaLancamentoIdx] = useState<number>(0);
-  const [valorManual, setValorManual] = useState<string>('');
+  const [valorDigitado, setValorDigitado] = useState<string>('');
   const [salvando, setSalvando] = useState<boolean>(false);
 
   // OCR
@@ -172,15 +206,15 @@ export default function App() {
   const diaSelecionado = diasSemana[diaSelecionadoIdx] || diasSemana[0];
   const diaLancamento = diasSemana[diaLancamentoIdx] || diasSemana[0];
   const totalSemana = diasSemana.reduce((acc, d) => acc + d.valor, 0);
+  const totalCobertoSemana = diasSemana.reduce((acc, d) => acc + d.valorCoberto, 0);
   const periodo = formatarPeriodo(diasSemana);
-  const maxGrafico = Math.max(
-    ...diasSemana.map(d => Math.max(d.valor, d.metaDoDia)),
-    metaDiariaBase * 1.2
-  );
+  const metaTotalSemana = metaDiariaBase * 7;
+  const diasAmortizadosCompletos = diasSemana.filter(d => d.percentual === 100).length;
 
-  // Próximo dia em relação ao dia selecionado
-  const proximoDiaIdx = diaSelecionadoIdx + 1;
-  const proximoDia = proximoDiaIdx < diasSemana.length ? diasSemana[proximoDiaIdx] : null;
+  // Valor atual que o dia já possui registrado
+  const valorJaExistente = diaLancamento.valor || 0;
+  const valorNovoNumerico = parseFloat(valorDigitado.replace(',', '.')) || 0;
+  const valorSomadoPreview = valorJaExistente + valorNovoNumerico;
 
   // ─── CARREGAMENTO INICIAL: LOCAL STORAGE (OFFLINE-FIRST) + SUPABASE ──────────
   useEffect(() => {
@@ -188,12 +222,9 @@ export default function App() {
   }, []);
 
   const inicializarDados = async () => {
-    // 1. Carrega Meta Base salva no celular
     const baseSalva = await carregarMetaBaseLocal(META_DIARIA_PADRAO);
     setMetaDiariaBase(baseSalva);
     setNovaMetaBaseInput(baseSalva.toString());
-
-    // 2. Carrega Ganhos Locais do celular (instantâneo, nunca some)
     await recarregarGanhosCombinados(baseSalva);
   };
 
@@ -201,7 +232,6 @@ export default function App() {
     const estrutura = gerarEstruturaSemana(hoje);
     const ganhosLocais = await carregarGanhosLocais();
 
-    // Mescla estrutura da semana com os ganhos do celular
     let diasAtualizados = estrutura.map(dia => {
       const reg = ganhosLocais[dia.dataISO];
       if (reg) {
@@ -214,7 +244,6 @@ export default function App() {
       return dia;
     });
 
-    // 3. Tenta buscar no Supabase e mesclar caso haja dados na nuvem
     try {
       const res = await buscarMetasPorSemana(estrutura[0].dataISO, estrutura[6].dataISO);
       if (res.success && res.data && res.data.length > 0) {
@@ -232,14 +261,11 @@ export default function App() {
         });
       }
     } catch {
-      // Offline ou tabela ainda não criada no Supabase: dados locais permanecem intactos!
+      // Ignora erro se offline
     }
 
-    // Aplica o motor de amortização em toda a semana
-    const semanaCalculada = aplicarAmortizacaoSemana(diasAtualizados, baseMeta);
+    const semanaCalculada = calcularAmortizacaoPorFases(diasAtualizados, baseMeta);
     setDiasSemana(semanaCalculada);
-
-    // Carrega histórico
     carregarHistorico();
   };
 
@@ -260,11 +286,10 @@ export default function App() {
     setAtualizando(false);
   }, [metaDiariaBase]);
 
-  // ─── ABERTURA DO MODAL DE LANÇAMENTO (COM SELETOR DE DIA) ───────────────────
+  // ─── ABERTURA DO MODAL DE LANÇAMENTO (SELEÇÃO RÁPIDA DE DIAS) ───────────────
   const abrirModalParaDia = (idx: number) => {
     setDiaLancamentoIdx(idx);
-    const dia = diasSemana[idx];
-    setValorManual(dia.valor > 0 ? dia.valor.toString() : '');
+    setValorDigitado('');
     setAnalisandoOCR(false);
     setOcrConfirmacaoPronta(false);
     setModalVisible(true);
@@ -305,7 +330,7 @@ export default function App() {
       const resultado = await processarOCRLocal(uri);
       const valorEncontrado = resultado.valorMetaExtrado ?? 0;
       setValorExtraidoOCR(valorEncontrado);
-      setValorManual(valorEncontrado > 0 ? valorEncontrado.toFixed(2) : '');
+      setValorDigitado(valorEncontrado > 0 ? valorEncontrado.toFixed(2) : '');
 
       setTimeout(() => {
         setAnalisandoOCR(false);
@@ -316,35 +341,39 @@ export default function App() {
     }
   };
 
-  // ─── SALVAR GANHO: PERSISTÊNCIA LOCAL + RECALCULO DE TODA A CADEIA ─────────
-  const handleSalvarGanho = async () => {
-    const valorFinal = parseFloat(valorManual.replace(',', '.')) || 0;
+  // ─── SALVAR GANHO: COM OPÇÃO DE SOMAR (ACUMULAR) OU SUBSTITUIR ──────────────
+  const handleExecutarSalvar = async (modo: 'somar' | 'substituir') => {
+    const valorDigitadoNum = parseFloat(valorDigitado.replace(',', '.')) || 0;
 
-    if (valorFinal < 0) {
-      Alert.alert('Valor inválido', 'Digite um valor de ganho positivo.');
+    if (valorDigitadoNum <= 0 && modo === 'somar') {
+      Alert.alert('Valor inválido', 'Digite o valor do ganho a adicionar.');
       return;
     }
+
+    const valorFinal = modo === 'somar'
+      ? valorJaExistente + valorDigitadoNum
+      : valorDigitadoNum;
 
     setSalvando(true);
 
     try {
-      // 1. Atualiza o dia no array
+      // 1. Atualiza o dia no array com o valor acumulado
       const semanaModificada = diasSemana.map((d, i) =>
         i === diaLancamentoIdx ? { ...d, valor: valorFinal, temRegistro: true } : d
       );
 
-      // 2. Recalcula amortização de toda a semana
-      const semanaRecalculada = aplicarAmortizacaoSemana(semanaModificada, metaDiariaBase);
+      // 2. Recalcula a amortização por fases em toda a semana
+      const semanaRecalculada = calcularAmortizacaoPorFases(semanaModificada, metaDiariaBase);
       setDiasSemana(semanaRecalculada);
       setDiaSelecionadoIdx(diaLancamentoIdx);
 
       const diaAtualizado = semanaRecalculada[diaLancamentoIdx];
 
-      // 3. Salva no celular via AsyncStorage (GARANTIA QUE NUNCA SOME)
+      // 3. Salva no celular via AsyncStorage (NUNCA SOME)
       await salvarGanhoLocalmente({
         dataISO: diaAtualizado.dataISO,
         valor: valorFinal,
-        metaDoDia: diaAtualizado.metaDoDia,
+        metaDoDia: diaAtualizado.metaBase,
         percentual: diaAtualizado.percentual,
         descricao: `Ganho ${diaAtualizado.sigla}`,
         atualizadoEm: new Date().toISOString(),
@@ -352,14 +381,17 @@ export default function App() {
 
       setModalVisible(false);
 
-      // Feedback sobre o dia seguinte
-      const proximo = diaLancamentoIdx + 1 < semanaRecalculada.length ? semanaRecalculada[diaLancamentoIdx + 1] : null;
-      let mensagemEfeito = `Ganho de R$ ${valorFinal.toFixed(2)} registrado para ${diaAtualizado.sigla}.`;
-      if (proximo) {
-        mensagemEfeito += `\n\n⚡ Meta de ${proximo.sigla} foi recalculada para R$ ${proximo.metaDoDia.toFixed(2)}.`;
+      // Feedback explicativo da cascata
+      const diasAmortizados = semanaRecalculada
+        .filter((d, i) => i > diaLancamentoIdx && d.percentual > 0)
+        .map(d => `${d.sigla} (${d.percentual}%)`);
+
+      let msg = `Ganho de ${diaAtualizado.sigla} atualizado para R$ ${valorFinal.toFixed(2)}.`;
+      if (diasAmortizados.length > 0) {
+        msg += `\n\n⚡ Dias adiantados pelo excedente:\n${diasAmortizados.join(', ')}!`;
       }
 
-      Alert.alert('✅ Ganho Salvo!', mensagemEfeito);
+      Alert.alert('✅ Ganho Registrado!', msg);
     } catch (err: any) {
       Alert.alert('Erro ao Salvar', err?.message || 'Falha ao registrar ganho.');
     } finally {
@@ -367,7 +399,7 @@ export default function App() {
     }
   };
 
-  // ─── SALVAR NOVA META BASE (Ex: 250) ───────────────────────────────────────
+  // ─── SALVAR NOVA META BASE ──────────────────────────────────────────────────
   const handleSalvarNovaMetaBase = async () => {
     const novaBase = parseFloat(novaMetaBaseInput.replace(',', '.'));
     if (isNaN(novaBase) || novaBase <= 0) {
@@ -378,12 +410,11 @@ export default function App() {
     setMetaDiariaBase(novaBase);
     await salvarMetaBaseLocal(novaBase);
 
-    // Recalcula a semana inteira com a nova meta base
-    const semanaAtualizada = aplicarAmortizacaoSemana(diasSemana, novaBase);
+    const semanaAtualizada = calcularAmortizacaoPorFases(diasSemana, novaBase);
     setDiasSemana(semanaAtualizada);
     setModalMetaBaseAberto(false);
 
-    Alert.alert('Meta Base Atualizada!', `Sua meta padrão agora é de R$ ${novaBase.toFixed(2)}.`);
+    Alert.alert('Meta Base Atualizada!', `Sua meta diária base agora é de R$ ${novaBase.toFixed(2)}.`);
   };
 
   return (
@@ -403,7 +434,7 @@ export default function App() {
 
           <TouchableOpacity
             style={styles.periodDropdown}
-            onPress={() => Alert.alert('Período Ativo', `Semana de ${periodo}.\nTodas as metas são recalculadas dinamicamente.`)}
+            onPress={() => Alert.alert('Período Ativo', `Semana de ${periodo}.\nMeta semanal total: R$ ${metaTotalSemana.toFixed(2)}.`)}
             activeOpacity={0.8}
           >
             <Text style={styles.periodDropdownText}>{periodo} ▾</Text>
@@ -421,7 +452,7 @@ export default function App() {
             <RefreshControl
               refreshing={atualizando}
               onRefresh={onRefresh}
-              tintColor="#00D26A"
+              tintColor="#00E676"
               colors={['#00D26A']}
             />
           }
@@ -437,14 +468,12 @@ export default function App() {
                   setModalMetaBaseAberto(true);
                 }}
               >
-                <Text style={styles.gearButtonText}>⚙️ Meta</Text>
+                <Text style={styles.gearButtonText}>⚙️ Meta: R$ {metaDiariaBase.toFixed(0)}</Text>
               </TouchableOpacity>
             </View>
 
             <Text style={styles.totalAmountText}>
-              {totalSemana > 0
-                ? `R$ ${totalSemana.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                : 'R$ 0,00'}
+              R$ {totalSemana.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </Text>
 
             {/* SUB-DESTAQUE: DIA SELECIONADO & BOTÃO LANÇAR */}
@@ -453,11 +482,11 @@ export default function App() {
                 <Text style={styles.selectedDayLabel}>{diaSelecionado.diaCompleto}:</Text>
                 <Text style={styles.selectedDayValue}>
                   {diaSelecionado.valor > 0
-                    ? `R$ ${diaSelecionado.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                    : 'Sem ganho registrado'}
+                    ? `Fez R$ ${diaSelecionado.valor.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                    : 'Sem ganho trabalhado'}
                 </Text>
                 <Text style={styles.selectedDayMetaInfo}>
-                  Meta deste dia: R$ {diaSelecionado.metaDoDia.toFixed(2)} ({diaSelecionado.percentual}%)
+                  Status: {diaSelecionado.detalheAmortizacao}
                 </Text>
               </View>
 
@@ -467,19 +496,24 @@ export default function App() {
                 activeOpacity={0.8}
               >
                 <Text style={styles.btnEditarGanhoTexto}>
-                  {diaSelecionado.valor > 0 ? '✏️ Editar' : '+ Inserir'}
+                  {diaSelecionado.valor > 0 ? '+ Adicionar' : '+ Inserir'}
                 </Text>
               </TouchableOpacity>
             </View>
           </View>
 
-          {/* GRÁFICO DE BARRAS (7 DIAS COM VALOR E META EM CADA COLUNA) */}
+          {/* GRÁFICO DE BARRAS DE AMORTIZAÇÃO (7 DIAS COM % COBERTO DE CADA FASE) */}
           <View style={styles.chartContainer}>
             <View style={styles.barsRow}>
               {diasSemana.map((item, index) => {
                 const isSelected = index === diaSelecionadoIdx;
-                const alturaValor = (item.valor / maxGrafico) * 110;
-                const alturaMeta = (item.metaDoDia / maxGrafico) * 110;
+                const alturaBarra = Math.max(10, item.percentual);
+
+                // Cor da barra dependendo do status de amortização
+                let corBarra = '#334155';
+                if (item.statusAmortizacao === 'atingida') corBarra = '#00E676';
+                else if (item.statusAmortizacao === 'adiantada') corBarra = '#38BDF8';
+                else if (item.statusAmortizacao === 'parcial') corBarra = '#FBBF24';
 
                 return (
                   <TouchableOpacity
@@ -488,33 +522,29 @@ export default function App() {
                     onPress={() => setDiaSelecionadoIdx(index)}
                     activeOpacity={0.7}
                   >
-                    {/* Exibe o ganho se houver, ou a meta recalculada no topo */}
-                    <Text style={[styles.barTopValue, isSelected && styles.barTopValueActive]}>
-                      {item.valor > 0
-                        ? `R$ ${Math.round(item.valor)}`
-                        : `M:${Math.round(item.metaDoDia)}`}
+                    {/* Exibe o percentual amortizado no topo de cada dia */}
+                    <Text
+                      style={[
+                        styles.barTopValue,
+                        isSelected && { color: '#FFFFFF', fontWeight: 'bold' },
+                        item.percentual === 100 && { color: '#00E676' },
+                      ]}
+                    >
+                      {item.percentual > 0 ? `${item.percentual}%` : '0%'}
                     </Text>
 
-                    {/* Trilho da Barra com Meta Tracejada e Preenchimento */}
+                    {/* Trilho da Barra com Preenchimento Dinâmico */}
                     <View style={styles.barTrack}>
-                      {/* Linha/Ghost da Meta deste dia */}
                       <View
                         style={[
-                          styles.metaGhostLine,
-                          { height: Math.max(alturaMeta, 10) },
+                          styles.barFill,
+                          {
+                            height: `${alturaBarra}%`,
+                            backgroundColor: corBarra,
+                          },
+                          isSelected && styles.barFillSelected,
                         ]}
                       />
-
-                      {/* Barra de Ganho Realizado */}
-                      {item.valor > 0 && (
-                        <View
-                          style={[
-                            styles.barFill,
-                            { height: Math.max(alturaValor, 10) },
-                            isSelected ? styles.barFillActive : styles.barFillInactive,
-                          ]}
-                        />
-                      )}
                     </View>
 
                     <Text
@@ -527,6 +557,10 @@ export default function App() {
                       {item.sigla}
                     </Text>
 
+                    {item.valor > 0 && (
+                      <Text style={styles.dayValorSub}>R${Math.round(item.valor)}</Text>
+                    )}
+
                     {item.isHoje && <View style={styles.hojeIndicator} />}
                   </TouchableOpacity>
                 );
@@ -534,68 +568,58 @@ export default function App() {
             </View>
 
             <Text style={styles.chartLegend}>
-              Toque nos dias para navegar • M: = Meta Recalculada de cada dia
+              Barras mostram o % amortizado de cada dia • Azul = Adiantado
             </Text>
           </View>
 
           {/* DIVISOR */}
           <View style={styles.horizontalDivider} />
 
-          {/* CARD DE AMORTIZAÇÃO (REGRA DE NEGÓCIO EXCLUSIVA) */}
+          {/* CARD DE AMORTIZAÇÃO (PROGRESSO DA SEMANA POR FASES) */}
           <View style={styles.amortizacaoCard}>
             <View style={styles.amortizacaoHeader}>
               <Text style={styles.amortizacaoTitle}>⚡ Regra Amortiza</Text>
-              <TouchableOpacity
-                onPress={() => {
-                  setNovaMetaBaseInput(metaDiariaBase.toString());
-                  setModalMetaBaseAberto(true);
-                }}
-              >
-                <Text style={styles.amortizacaoBadge}>Base: R$ {metaDiariaBase.toFixed(0)} ⚙️</Text>
-              </TouchableOpacity>
+              <Text style={styles.amortizacaoBadge}>
+                {diasAmortizadosCompletos}/7 Dias Pagos
+              </Text>
             </View>
 
-            {/* Meta do Dia Selecionado */}
+            {/* Destaque da Semana */}
             <View style={{ marginVertical: 8 }}>
               <Text style={styles.amortizacaoSubHeader}>
-                Meta para {diaSelecionado.diaCompleto}:
+                Progresso Semanal (Meta: R$ {metaTotalSemana.toFixed(2)}):
               </Text>
               <Text style={styles.amortizacaoAmount}>
-                R$ {diaSelecionado.metaDoDia.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                R$ {totalCobertoSemana.toFixed(2)} cobertos
               </Text>
             </View>
 
-            {/* Barra de Progresso do Dia Selecionado */}
+            {/* Barra de Progresso Total da Semana */}
             <View style={styles.progressContainer}>
               <View style={styles.progressTrack}>
-                <View style={[styles.progressFill, { width: `${Math.min(100, diaSelecionado.percentual)}%` }]} />
+                <View
+                  style={[
+                    styles.progressFill,
+                    { width: `${Math.min(100, Math.round((totalCobertoSemana / metaTotalSemana) * 100))}%` },
+                  ]}
+                />
               </View>
               <Text style={styles.progressText}>
-                {diaSelecionado.percentual}% da meta atingida (R$ {diaSelecionado.valor.toFixed(2)} de R$ {diaSelecionado.metaDoDia.toFixed(2)})
+                {Math.round((totalCobertoSemana / metaTotalSemana) * 100)}% da semana concluída
               </Text>
             </View>
 
-            {/* Impacto Direto no Próximo Dia */}
+            {/* Detalhamento do Dia Selecionado */}
             <View style={styles.impactoContainer}>
-              {proximoDia ? (
-                <>
-                  <Text style={styles.impactoTitulo}>
-                    👉 Efeito em {proximoDia.sigla} ({proximoDia.dataExibicao}):
-                  </Text>
-                  <Text style={styles.impactoValor}>
-                    Meta recalculada: <Text style={{ color: '#00D26A', fontWeight: 'bold' }}>R$ {proximoDia.metaDoDia.toFixed(2)}</Text>
-                  </Text>
-                  <Text style={styles.impactoExplicacao}>
-                    {diaSelecionado.valor >= diaSelecionado.metaDoDia
-                      ? `🎉 Superávit de +R$ ${(diaSelecionado.valor - diaSelecionado.metaDoDia).toFixed(2)} amortizou a meta de ${proximoDia.sigla}!`
-                      : `⚠️ Déficit de R$ ${(diaSelecionado.metaDoDia - diaSelecionado.valor).toFixed(2)} acumulou para a meta de ${proximoDia.sigla}.`}
-                  </Text>
-                </>
-              ) : (
-                <Text style={styles.impactoExplicacao}>
-                  Domingo é o fechamento da semana! Todo saldo conclui o ciclo semanal.
-                </Text>
-              )}
+              <Text style={styles.impactoTitulo}>
+                📅 {diaSelecionado.diaCompleto}:
+              </Text>
+              <Text style={styles.impactoValor}>
+                Fez: <Text style={{ color: '#00E676', fontWeight: 'bold' }}>R$ {diaSelecionado.valor.toFixed(2)}</Text> • Meta Base: R$ {metaDiariaBase.toFixed(2)}
+              </Text>
+              <Text style={styles.impactoExplicacao}>
+                Status: <Text style={{ color: '#F8FAFC', fontWeight: 'bold' }}>{diaSelecionado.detalheAmortizacao}</Text>
+              </Text>
             </View>
           </View>
 
@@ -663,7 +687,7 @@ export default function App() {
                   setModalMetaBaseAberto(true);
                 }}
               >
-                <Text style={styles.drawerItemText}>🎯 Configurar Meta Base</Text>
+                <Text style={styles.drawerItemText}>🎯 Configurar Meta Diária</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -682,11 +706,11 @@ export default function App() {
                   setMenuDrawerAberto(false);
                   Alert.alert(
                     'Regra Amortiza',
-                    'Se você não bater a meta hoje, a diferença é adicionada na meta de amanhã.\nSe você fizer a mais, o excedente é amortizado e a meta de amanhã diminui!'
+                    'Quando você faz mais do que a meta do dia, o excedente paga as metas dos dias seguintes!\nExemplo: meta 100, fez 250 -> Segunda (100%), Terça (100%), Quarta (50%).'
                   );
                 }}
               >
-                <Text style={styles.drawerItemText}>ℹ️ Como Funciona a Amortização</Text>
+                <Text style={styles.drawerItemText}>ℹ️ Como Funciona a Regra</Text>
               </TouchableOpacity>
 
               <View style={styles.drawerFooter}>
@@ -705,7 +729,7 @@ export default function App() {
         >
           <View style={styles.modalOverlayCentral}>
             <View style={styles.cardModalCentral}>
-              <Text style={styles.modalTitleText}>Meta Base Diária</Text>
+              <Text style={styles.modalTitleText}>Meta Diária Base</Text>
               <Text style={styles.modalSubText}>Qual é o seu objetivo padrão de ganho por dia?</Text>
 
               <Text style={styles.inputLabel}>Valor Base (R$)</Text>
@@ -714,7 +738,7 @@ export default function App() {
                 keyboardType="numeric"
                 value={novaMetaBaseInput}
                 onChangeText={setNovaMetaBaseInput}
-                placeholder="Ex: 200.00"
+                placeholder="Ex: 100.00"
                 placeholderTextColor="#64748B"
                 autoFocus
               />
@@ -778,7 +802,7 @@ export default function App() {
           </View>
         </Modal>
 
-        {/* MODAL 4: LANÇAMENTO DIRETO (SEM DIGITAR DATA - SELEÇÃO RÁPIDA) */}
+        {/* MODAL 4: LANÇAMENTO DIRETO (COM OPÇÃO DE SOMAR OU SUBSTITUIR) */}
         <Modal
           animationType="slide"
           transparent={true}
@@ -810,39 +834,53 @@ export default function App() {
                     <Text style={styles.highlightText}>
                       R$ {valorExtraidoOCR.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </Text>
-                    {' '}para {diaLancamento.diaCompleto}. Confirmar?
+                    {' '}para {diaLancamento.diaCompleto}. Como deseja salvar?
                   </Text>
 
+                  {valorJaExistente > 0 && (
+                    <TouchableOpacity
+                      style={styles.primaryActionButton}
+                      onPress={() => handleExecutarSalvar('somar')}
+                      disabled={salvando}
+                    >
+                      {salvando ? (
+                        <ActivityIndicator color="#0A0F1D" />
+                      ) : (
+                        <Text style={styles.primaryActionText}>
+                          + Somar aos R$ {valorJaExistente.toFixed(2)} (Total: R$ {(valorJaExistente + valorExtraidoOCR).toFixed(2)})
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  )}
+
                   <TouchableOpacity
-                    style={styles.primaryActionButton}
-                    onPress={handleSalvarGanho}
+                    style={valorJaExistente > 0 ? styles.secondaryActionButton : styles.primaryActionButton}
+                    onPress={() => handleExecutarSalvar('substituir')}
                     disabled={salvando}
                   >
-                    {salvando ? (
-                      <ActivityIndicator color="#0A0F1D" />
-                    ) : (
-                      <Text style={styles.primaryActionText}>Confirmar e Salvar</Text>
-                    )}
+                    <Text style={valorJaExistente > 0 ? styles.secondaryActionText : styles.primaryActionText}>
+                      {valorJaExistente > 0 ? `Substituir por R$ ${valorExtraidoOCR.toFixed(2)}` : 'Confirmar e Salvar'}
+                    </Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
-                    style={styles.secondaryActionButton}
+                    style={[styles.secondaryActionButton, { marginTop: 8 }]}
                     onPress={() => setOcrConfirmacaoPronta(false)}
                   >
-                    <Text style={styles.secondaryActionText}>Ajustar Valor Manualmente</Text>
+                    <Text style={styles.secondaryActionText}>Digitar Manualmente</Text>
                   </TouchableOpacity>
                 </View>
               )}
 
-              {/* ESTADO 3: INSERÇÃO MANUAL COM SELEÇÃO DE DIA (SEM DIGITAR DATA!) */}
+              {/* ESTADO 3: INSERÇÃO MANUAL COM SELETOR DE DIA E SOMA INTELIGENTE */}
               {!analisandoOCR && !ocrConfirmacaoPronta && (
                 <View style={styles.modalContentState}>
                   <Text style={styles.modalTitleText}>Lançar Ganho</Text>
                   <Text style={styles.modalSubText}>
-                    Selecione o dia e digite o valor:
+                    Selecione o dia e informe o valor:
                   </Text>
 
-                  {/* SELETOR DE DIAS DA SEMANA (NADA DE DIGITAR DATA!) */}
+                  {/* SELETOR DE DIAS DA SEMANA */}
                   <View style={styles.diaSelectorRow}>
                     {diasSemana.map((d, idx) => {
                       const ativo = idx === diaLancamentoIdx;
@@ -852,7 +890,7 @@ export default function App() {
                           style={[styles.diaPill, ativo && styles.diaPillAtivo]}
                           onPress={() => {
                             setDiaLancamentoIdx(idx);
-                            setValorManual(d.valor > 0 ? d.valor.toString() : '');
+                            setValorDigitado('');
                           }}
                         >
                           <Text style={[styles.diaPillTexto, ativo && styles.diaPillTextoAtivo]}>
@@ -869,55 +907,94 @@ export default function App() {
                     {diaLancamento.isHoje ? ' (Hoje)' : ''}
                   </Text>
 
-                  {/* CAMPO DE VALOR GIGANTE */}
-                  <Text style={styles.inputLabel}>Quanto você fez? (R$)</Text>
+                  {/* Mostra o ganho que já existe para o usuário saber que vai somar */}
+                  {valorJaExistente > 0 && (
+                    <View style={styles.avisoAcumuloContainer}>
+                      <Text style={styles.avisoAcumuloTexto}>
+                        💡 Já registrado hoje: <Text style={{ color: '#00E676', fontWeight: 'bold' }}>R$ {valorJaExistente.toFixed(2)}</Text>
+                      </Text>
+                    </View>
+                  )}
+
+                  {/* CAMPO DE VALOR */}
+                  <Text style={styles.inputLabel}>
+                    {valorJaExistente > 0 ? 'Quanto quer adicionar a mais? (R$)' : 'Quanto você fez? (R$)'}
+                  </Text>
                   <TextInput
                     style={styles.modalInputGrande}
                     keyboardType="numeric"
-                    value={valorManual}
-                    onChangeText={setValorManual}
+                    value={valorDigitado}
+                    onChangeText={setValorDigitado}
                     placeholder="0.00"
                     placeholderTextColor="#64748B"
                     autoFocus
                   />
 
-                  {/* ATALHOS RÁPIDOS DE VALOR */}
+                  {/* ATALHOS RÁPIDOS */}
                   <View style={styles.atalhosValorRow}>
                     {[50, 100, 150, 200].map(v => (
                       <TouchableOpacity
                         key={v}
                         style={styles.atalhoBtn}
-                        onPress={() => setValorManual(v.toString())}
+                        onPress={() => setValorDigitado(v.toString())}
                       >
                         <Text style={styles.atalhoBtnTexto}>+{v}</Text>
                       </TouchableOpacity>
                     ))}
                     <TouchableOpacity
                       style={[styles.atalhoBtn, { backgroundColor: '#334155' }]}
-                      onPress={() => setValorManual('')}
+                      onPress={() => setValorDigitado('')}
                     >
                       <Text style={[styles.atalhoBtnTexto, { color: '#F8FAFC' }]}>Limpar</Text>
                     </TouchableOpacity>
                   </View>
 
-                  {/* BOTÕES DE AÇÃO */}
-                  <TouchableOpacity
-                    style={styles.primaryActionButton}
-                    onPress={handleSalvarGanho}
-                    disabled={salvando}
-                  >
-                    {salvando ? (
-                      <ActivityIndicator color="#0A0F1D" />
-                    ) : (
-                      <Text style={styles.primaryActionText}>Salvar Ganho</Text>
-                    )}
-                  </TouchableOpacity>
+                  {/* BOTÃO PRINCIPAL: SE JÁ EXISTE VALOR, SOMA! */}
+                  {valorJaExistente > 0 && valorNovoNumerico > 0 ? (
+                    <>
+                      <TouchableOpacity
+                        style={styles.primaryActionButton}
+                        onPress={() => handleExecutarSalvar('somar')}
+                        disabled={salvando}
+                      >
+                        {salvando ? (
+                          <ActivityIndicator color="#0A0F1D" />
+                        ) : (
+                          <Text style={styles.primaryActionText}>
+                            + Somar R$ {valorNovoNumerico.toFixed(2)} (Novo Total: R$ {valorSomadoPreview.toFixed(2)})
+                          </Text>
+                        )}
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={styles.secondaryActionButton}
+                        onPress={() => handleExecutarSalvar('substituir')}
+                        disabled={salvando}
+                      >
+                        <Text style={styles.secondaryActionText}>
+                          Substituir por R$ {valorNovoNumerico.toFixed(2)}
+                        </Text>
+                      </TouchableOpacity>
+                    </>
+                  ) : (
+                    <TouchableOpacity
+                      style={styles.primaryActionButton}
+                      onPress={() => handleExecutarSalvar(valorJaExistente > 0 ? 'substituir' : 'somar')}
+                      disabled={salvando}
+                    >
+                      {salvando ? (
+                        <ActivityIndicator color="#0A0F1D" />
+                      ) : (
+                        <Text style={styles.primaryActionText}>Salvar Ganho</Text>
+                      )}
+                    </TouchableOpacity>
+                  )}
 
                   <TouchableOpacity
-                    style={styles.secondaryActionButton}
+                    style={[styles.secondaryActionButton, { marginTop: 8, borderColor: 'transparent' }]}
                     onPress={() => setModalVisible(false)}
                   >
-                    <Text style={styles.secondaryActionText}>Cancelar</Text>
+                    <Text style={[styles.secondaryActionText, { color: '#64748B' }]}>Cancelar</Text>
                   </TouchableOpacity>
                 </View>
               )}
@@ -1079,12 +1156,9 @@ const styles = StyleSheet.create({
   },
   barTopValue: {
     color: '#64748B',
-    fontSize: 8.5,
+    fontSize: 9,
     fontWeight: '700',
     marginBottom: 4,
-  },
-  barTopValueActive: {
-    color: '#00D26A',
   },
   barTrack: {
     width: 22,
@@ -1093,26 +1167,14 @@ const styles = StyleSheet.create({
     borderRadius: 11,
     justifyContent: 'flex-end',
     overflow: 'hidden',
-    position: 'relative',
-  },
-  metaGhostLine: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    borderTopWidth: 2,
-    borderTopColor: '#38BDF8',
-    backgroundColor: 'rgba(56, 189, 248, 0.08)',
   },
   barFill: {
     width: '100%',
     borderRadius: 11,
   },
-  barFillActive: {
-    backgroundColor: '#00D26A',
-  },
-  barFillInactive: {
-    backgroundColor: '#10B981',
+  barFillSelected: {
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
   },
   dayLabel: {
     color: '#64748B',
@@ -1127,12 +1189,17 @@ const styles = StyleSheet.create({
   dayLabelHoje: {
     color: '#00D26A',
   },
+  dayValorSub: {
+    color: '#94A3B8',
+    fontSize: 8.5,
+    marginTop: 1,
+  },
   hojeIndicator: {
     width: 4,
     height: 4,
     borderRadius: 2,
     backgroundColor: '#00D26A',
-    marginTop: 3,
+    marginTop: 2,
   },
   chartLegend: {
     color: '#64748B',
@@ -1186,7 +1253,7 @@ const styles = StyleSheet.create({
   },
   amortizacaoAmount: {
     color: '#FFFFFF',
-    fontSize: 32,
+    fontSize: 30,
     fontWeight: '800',
     marginVertical: 4,
   },
@@ -1468,8 +1535,8 @@ const styles = StyleSheet.create({
     borderColor: '#334155',
   },
   diaPillAtivo: {
-    backgroundColor: '#00D26A',
-    borderColor: '#00D26A',
+    backgroundColor: '#00E676',
+    borderColor: '#00E676',
   },
   diaPillTexto: {
     color: '#94A3B8',
@@ -1490,7 +1557,22 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontSize: 13,
     fontWeight: '600',
-    marginBottom: 14,
+    marginBottom: 10,
+  },
+
+  // AVISO DE GANHO JÁ EXISTENTE
+  avisoAcumuloContainer: {
+    backgroundColor: 'rgba(0, 210, 106, 0.1)',
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 210, 106, 0.25)',
+    marginBottom: 12,
+  },
+  avisoAcumuloTexto: {
+    color: '#F8FAFC',
+    fontSize: 12,
   },
 
   // CAMPO GIGANTE DE VALOR

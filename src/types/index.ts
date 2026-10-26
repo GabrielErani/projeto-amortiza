@@ -8,7 +8,7 @@ export interface MetaNumerica {
   valor_meta: number;
   valor_atingido: number;
   percentual: number;
-  data_referencia?: string; // Data no formato YYYY-MM-DD para vincular ao dia correto
+  data_referencia?: string;
 }
 
 export interface ResultadoOCR {
@@ -17,17 +17,19 @@ export interface ResultadoOCR {
   percentualExtraido: number | null;
 }
 
-// Representa os dados de ganho e a meta recalculada de um dia da semana
+// Representa os dados de ganho e o status de amortização de um dia da semana
 export interface GanhoDia {
   data: Date;           // Objeto Date do dia
-  dataISO: string;      // Formato YYYY-MM-DD para lookup no banco
-  dataExibicao: string; // Formato "24 de out" para exibição
+  dataISO: string;      // Formato YYYY-MM-DD para lookup
+  dataExibicao: string; // "26 de out"
   diaCompleto: string;  // "Segunda-feira, 26 de out"
   sigla: string;        // "Seg", "Ter", ..., "Dom"
-  valor: number;        // Valor de ganho registrado (0 se não houver)
-  metaDoDia: number;    // Meta recalculada deste dia (considerando amortização)
-  saldoDia: number;     // metaDoDia - valor (positivo = déficit, negativo = sobra/amortizado)
-  percentual: number;   // Porcentagem concluída deste dia
-  isHoje: boolean;      // true se for o dia de hoje
-  temRegistro: boolean; // true se o usuário já salvou ganho para este dia
+  valor: number;        // Ganho real trabalhado neste dia
+  valorCoberto: number; // Quanto da meta deste dia está coberto (trabalhado + amortizado)
+  metaBase: number;     // Meta base deste dia (ex: 100)
+  percentual: number;   // 0% a 100% da meta coberta neste dia
+  statusAmortizacao: 'atingida' | 'parcial' | 'pendente' | 'adiantada';
+  detalheAmortizacao: string; // Ex: "100% pago", "Amortizado por Seg", "Faltam R$ 50"
+  isHoje: boolean;
+  temRegistro: boolean;
 }
