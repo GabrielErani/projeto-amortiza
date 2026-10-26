@@ -42,6 +42,8 @@ export interface DividaItem {
   tipo: 'diaria' | 'mensal' | 'imprevista';
   frequenciaImprevisto?: 'diaria' | 'mensal' | 'anual';
   dataLancamento: string;
+  atualizadoEm?: string; // ISO datetime — usado no merge last-write-wins
+  removido?: boolean;    // Soft delete (tombstone) para sincronizar exclusões
 }
 
 // Representa uma semana do mês no seletor da Carteira
@@ -52,4 +54,37 @@ export interface SemanaMesInfo {
   dataFimISO: string;
   totalGanhos: number;
   isAtual: boolean;
+}
+
+// ─── AUTENTICAÇÃO & SINCRONIZAÇÃO ────────────────────────────────────────────
+
+// Usuário autenticado (espelho simplificado do Supabase Auth)
+export interface Usuario {
+  id: string;
+  email: string | null;
+  nome: string | null;
+}
+
+// Registro local de ganho de um dia (fonte da verdade offline-first)
+export interface RegistroGanhoLocal {
+  dataISO: string;      // YYYY-MM-DD (chave única por dia)
+  valor: number;
+  metaDoDia: number;
+  percentual: number;
+  descricao?: string;
+  atualizadoEm: string; // ISO datetime — usado no merge last-write-wins
+}
+
+// Resultado padrão de qualquer chamada de serviço (auth, nuvem, sync)
+export type ResultadoServico<T = undefined> =
+  | { success: true; data: T }
+  | { success: false; error: string };
+
+// Estado da sincronização com a nuvem exibido na UI
+export type StatusSync = 'sem_conta' | 'offline' | 'sincronizando' | 'ok' | 'erro';
+
+export interface EstadoSync {
+  status: StatusSync;
+  ultimaSync?: string; // ISO datetime da última sincronização bem-sucedida
+  mensagem?: string;   // Texto curto amigável para exibir ao usuário
 }

@@ -14,7 +14,10 @@
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "strict": true,
-    "target": "esnext"
+    "target": "esnext",
+    "types": [
+      "jest"
+    ]
   },
   "extends": "expo/tsconfig.base"
 }
