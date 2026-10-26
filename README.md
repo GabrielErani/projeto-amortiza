@@ -125,8 +125,8 @@ npm run typecheck
 
 ```powershell
 # 1. Clonar o repositório
-git clone https://github.com/GabrielErani/projeto-amortiza.git
-cd projeto-amortiza
+git clone https://github.com/RobertoNeto-Br/Projeto-Amortiza.git
+cd Projeto-Amortiza
 
 # 2. Instalar dependências
 npm install --legacy-peer-deps
