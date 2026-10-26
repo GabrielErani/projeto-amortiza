@@ -15,6 +15,7 @@ const CHAVE_META_BASE = '@amortiza_meta_base_v1';
 const CHAVE_META_BASE_ATUALIZADA_EM = '@amortiza_meta_base_atualizada_em_v1';
 const CHAVE_DIVIDAS = '@amortiza_dividas_v1';
 const CHAVE_ESTADO_SYNC = '@amortiza_estado_sync_v1';
+const CHAVE_ULTIMO_USUARIO = '@amortiza_ultimo_usuario_v1';
 
 const META_BASE_PADRAO = 100;
 
@@ -26,6 +27,7 @@ let cacheMemoriaMetaBase: number | null = null;
 let cacheMemoriaMetaBaseAtualizadaEm: string | null = null;
 let cacheMemoriaDividas: DividaItem[] = []; // inclui tombstones (removido=true)
 let cacheMemoriaEstadoSync: EstadoSync | null = null;
+let cacheMemoriaUltimoUsuario: string | null = null;
 
 async function lerJSON<T>(chave: string): Promise<T | null> {
   try {
@@ -202,6 +204,29 @@ export async function carregarEstadoSyncPersistido(): Promise<EstadoSync | null>
   const estado = await lerJSON<EstadoSync>(CHAVE_ESTADO_SYNC);
   if (estado) cacheMemoriaEstadoSync = estado;
   return cacheMemoriaEstadoSync;
+}
+
+// ─── ÚLTIMO USUÁRIO DO APARELHO ──────────────────────────────────────────────
+// Não é apagado em limparDadosLocais: serve para detectar que OUTRA conta entrou
+// depois de uma sessão que terminou sem passar pelo "Sair" (token expirado/revogado).
+
+export async function carregarUltimoUsuarioId(): Promise<string | null> {
+  try {
+    const id = await AsyncStorage.getItem(CHAVE_ULTIMO_USUARIO);
+    if (id) cacheMemoriaUltimoUsuario = id;
+  } catch {
+    // Retorna cache
+  }
+  return cacheMemoriaUltimoUsuario;
+}
+
+export async function salvarUltimoUsuarioId(id: string): Promise<void> {
+  cacheMemoriaUltimoUsuario = id;
+  try {
+    await AsyncStorage.setItem(CHAVE_ULTIMO_USUARIO, id);
+  } catch {
+    // Mantém no cache
+  }
 }
 
 // ─── LIMPEZA (LOGOUT) ────────────────────────────────────────────────────────

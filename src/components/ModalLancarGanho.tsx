@@ -151,7 +151,7 @@ export function ModalLancarGanho({
               {valorJaExistente > 0 && (
                 <View style={styles.avisoAcumuloContainer}>
                   <Text style={styles.avisoAcumuloTexto}>
-                    💡 Já registrado hoje: <Text style={{ color: cores.primaria, fontWeight: 'bold' }}>R$ {valorJaExistente.toFixed(2)}</Text>
+                    💡 Já registrado neste dia: <Text style={{ color: cores.primaria, fontWeight: 'bold' }}>R$ {valorJaExistente.toFixed(2)}</Text>
                   </Text>
                 </View>
               )}

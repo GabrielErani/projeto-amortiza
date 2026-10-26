@@ -23,8 +23,11 @@ import {
   carregarEstadoSyncPersistido,
   carregarGanhosLocais,
   carregarMetaBaseComData,
+  carregarUltimoUsuarioId,
   gravarMetaBaseLocal,
+  limparDadosLocais,
   salvarEstadoSyncPersistido,
+  salvarUltimoUsuarioId,
   substituirDividasLocais,
   substituirGanhosLocais,
 } from './storage';
@@ -89,10 +92,25 @@ export function definirUsuarioSync(userId: string | null) {
   }
 
   if (mudou) {
-    restaurarEstadoPersistido().finally(() => {
-      void sincronizarTudo(userId);
+    prepararAparelhoParaUsuario(userId).finally(() => {
+      // Se o usuário saiu enquanto o aparelho era preparado, não há o que sincronizar.
+      if (usuarioAtualId === userId) void sincronizarTudo(userId);
     });
   }
+}
+
+/**
+ * Se a última conta deste aparelho saiu sem passar pelo "Sair" (sessão expirada ou
+ * revogada), os dados locais ainda são dela: são apagados antes de sincronizar, para que
+ * nunca sejam enviados para outra conta. O mesmo usuário voltando mantém tudo.
+ */
+async function prepararAparelhoParaUsuario(userId: string) {
+  const anterior = await carregarUltimoUsuarioId();
+  if (anterior && anterior !== userId) {
+    await limparDadosLocais();
+  }
+  await salvarUltimoUsuarioId(userId);
+  await restaurarEstadoPersistido();
 }
 
 async function restaurarEstadoPersistido() {
