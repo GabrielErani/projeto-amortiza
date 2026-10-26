@@ -1,653 +1,518 @@
-// Testes de src/screens/AuthScreen.tsx: SENHA_MINIMA, emailValido, validarFormularioAuth e a tela de acesso
-// (entrar, criar conta, confirmação de e-mail, recuperar senha, continuar sem conta e voltar).
-//
-// O serviço de autenticação (src/services/auth) é mockado: nenhum teste acessa o Supabase.
-// O BackHandler do preset de testes é o stub de iOS (não emite eventos), então ele é espionado.
-
 import React from 'react';
-import { BackHandler, TextInput } from 'react-native';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react-native';
-import {
-  AuthScreen,
-  emailValido,
-  SENHA_MINIMA,
-  validarFormularioAuth,
-  type AuthScreenProps,
-  type ModoAuth,
-} from '../../src/screens/AuthScreen';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { AuthScreen } from '../../src/screens/AuthScreen';
 import { cadastrar, entrar, recuperarSenha } from '../../src/services/auth';
-import type { ResultadoServico, Usuario } from '../../src/types';
+import { cores } from '../../src/theme';
 
 jest.mock('../../src/services/auth', () => ({
-  entrar: jest.fn(),
   cadastrar: jest.fn(),
+  entrar: jest.fn(),
   recuperarSenha: jest.fn(),
-  sair: jest.fn(),
-  observarSessao: jest.fn(),
 }));
 
-const entrarMock = jest.mocked(entrar);
-const cadastrarMock = jest.mocked(cadastrar);
-const recuperarSenhaMock = jest.mocked(recuperarSenha);
+const USUARIO = { id: 'u1', email: 'ana@exemplo.com', nome: 'Ana' };
 
-const USUARIO: Usuario = { id: 'user-123', email: 'joao@exemplo.com', nome: 'João' };
+const campoNome = () => screen.getByPlaceholderText('Como quer ser chamado');
+const campoEmail = () => screen.getByPlaceholderText('voce@exemplo.com');
+const campoSenha = () => screen.getByPlaceholderText('Mínimo 6 caracteres');
+const indicadoresDeCarregamento = () =>
+  screen.container.queryAll((el) => el.type === 'ActivityIndicator');
 
-const MSG = {
-  nome: 'Informe seu nome.',
-  emailVazio: 'Informe seu e-mail.',
-  emailInvalido: 'E-mail inválido. Verifique e tente novamente.',
-  senhaVazia: 'Informe sua senha.',
-  senhaCurta: 'A senha precisa ter pelo menos 6 caracteres.',
-  emailParaRecuperar: 'Digite seu e-mail acima para recuperar a senha.',
-};
-const TEXTO_ENTRAR = 'Entre para sincronizar seus ganhos e dívidas na nuvem.';
-const TEXTO_CADASTRAR = 'Crie sua conta para guardar seus dados na nuvem e usar em outros aparelhos.';
-
-/** O mock de TextInput do React Native compartilha um jest.fn de focus() entre todas as instâncias. */
-const focoDoTextInput = (TextInput as unknown as { prototype: { focus: jest.Mock } }).prototype.focus;
-
-function adiado<T>() {
-  let resolver!: (valor: T) => void;
-  const promessa = new Promise<T>((resolve) => {
-    resolver = resolve;
-  });
-  return { promessa, resolver };
+function deferred<T>() {
+  let resolve: (v: T) => void = () => {};
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
 }
 
-// ─── Auxiliares de tela ───────────────────────────────────────────────────────
-
-async function renderizar(props: Partial<AuthScreenProps> = {}) {
+async function renderizar(props: Partial<React.ComponentProps<typeof AuthScreen>> = {}) {
   const onContinuarSemConta = jest.fn();
   await render(<AuthScreen onContinuarSemConta={onContinuarSemConta} {...props} />);
   return { onContinuarSemConta };
 }
 
-const botaoPrincipal = () => screen.getByTestId('auth-botao-principal');
-const pilula = (modo: ModoAuth) => screen.getByTestId(`auth-modo-${modo}`);
-const campoNome = () => screen.getByLabelText('Nome');
-const campoEmail = () => screen.getByLabelText('E-mail');
-const campoSenha = () => screen.getByLabelText('Senha');
-const linkEsqueci = () => screen.getByRole('button', { name: /Esqueci minha senha|Enviando\.\.\./ });
-const spinners = () => screen.container.queryAll((el) => el.type === 'ActivityIndicator');
-
-async function preencher(campos: { nome?: string; email?: string; senha?: string }) {
-  if (campos.nome !== undefined) await fireEvent.changeText(campoNome(), campos.nome);
-  if (campos.email !== undefined) await fireEvent.changeText(campoEmail(), campos.email);
-  if (campos.senha !== undefined) await fireEvent.changeText(campoSenha(), campos.senha);
+async function preencherLogin(email = 'ana@exemplo.com', senha = 'segredo1') {
+  await fireEvent.changeText(campoEmail(), email);
+  await fireEvent.changeText(campoSenha(), senha);
 }
 
 async function irParaCadastro() {
-  await fireEvent.press(pilula('cadastrar'));
+  await fireEvent.press(screen.getByRole('tab', { name: 'Criar conta' }));
 }
 
-// ─── Configuração ─────────────────────────────────────────────────────────────
-
-let adicionarBackHandler: jest.SpyInstance;
-let handlersVoltar: Array<() => boolean | null | undefined>;
-const removerBackHandler = jest.fn();
-
 beforeEach(() => {
-  entrarMock.mockReset().mockResolvedValue({ success: true, data: USUARIO });
-  cadastrarMock.mockReset().mockResolvedValue({ success: true, data: { precisaConfirmarEmail: false } });
-  recuperarSenhaMock.mockReset().mockResolvedValue({ success: true, data: undefined });
-  focoDoTextInput.mockClear();
-  removerBackHandler.mockClear();
-  handlersVoltar = [];
-  adicionarBackHandler = jest.spyOn(BackHandler, 'addEventListener').mockImplementation((_evento, handler) => {
-    handlersVoltar.push(handler as () => boolean | null | undefined);
-    return { remove: removerBackHandler };
-  });
+  jest.clearAllMocks();
+  jest.mocked(entrar).mockResolvedValue({ success: true, data: USUARIO });
+  jest.mocked(cadastrar).mockResolvedValue({ success: true, data: { precisaConfirmarEmail: true } });
+  jest.mocked(recuperarSenha).mockResolvedValue({ success: true, data: undefined });
 });
-
-afterEach(() => {
-  adicionarBackHandler.mockRestore();
-});
-
-// ─── Funções exportadas ───────────────────────────────────────────────────────
-
-describe('SENHA_MINIMA', () => {
-  it('exige pelo menos 6 caracteres (mesmo mínimo padrão do Supabase)', () => {
-    expect(SENHA_MINIMA).toBe(6);
-  });
-});
-
-describe('emailValido', () => {
-  it.each(['joao@exemplo.com', 'maria.silva+app@empresa.com.br', 'a@b.co', '  joao@exemplo.com  '])(
-    'aceita %j',
-    (email) => {
-      expect(emailValido(email)).toBe(true);
-    }
-  );
-
-  it.each(['', '   ', 'joao', 'joao@', '@exemplo.com', 'joao@exemplo', 'joao@exemplo.c', 'joao silva@exemplo.com', 'joao@@exemplo.com'])(
-    'rejeita %j',
-    (email) => {
-      expect(emailValido(email)).toBe(false);
-    }
-  );
-});
-
-describe('validarFormularioAuth', () => {
-  const OK = { nome: 'João', email: 'joao@exemplo.com', senha: 'segredo1' };
-
-  it.each<ModoAuth>(['entrar', 'cadastrar'])('devolve null quando está tudo certo (modo %s)', (modo) => {
-    expect(validarFormularioAuth({ modo, ...OK })).toBeNull();
-  });
-
-  it('no cadastro exige o nome (espaços não contam)', () => {
-    expect(validarFormularioAuth({ modo: 'cadastrar', ...OK, nome: '' })).toBe(MSG.nome);
-    expect(validarFormularioAuth({ modo: 'cadastrar', ...OK, nome: '   ' })).toBe(MSG.nome);
-  });
-
-  it('ao entrar, o nome é ignorado', () => {
-    expect(validarFormularioAuth({ modo: 'entrar', ...OK, nome: '' })).toBeNull();
-  });
-
-  it.each(['', '   '])('exige o e-mail (%j)', (email) => {
-    expect(validarFormularioAuth({ modo: 'entrar', ...OK, email })).toBe(MSG.emailVazio);
-  });
-
-  it('rejeita e-mail inválido', () => {
-    expect(validarFormularioAuth({ modo: 'entrar', ...OK, email: 'joao@exemplo' })).toBe(MSG.emailInvalido);
-  });
-
-  it('exige a senha', () => {
-    expect(validarFormularioAuth({ modo: 'entrar', ...OK, senha: '' })).toBe(MSG.senhaVazia);
-  });
-
-  it('exige o mínimo de caracteres na senha (inclusive ao entrar)', () => {
-    expect(validarFormularioAuth({ modo: 'entrar', ...OK, senha: '12345' })).toBe(MSG.senhaCurta);
-    expect(validarFormularioAuth({ modo: 'cadastrar', ...OK, senha: '12345' })).toBe(MSG.senhaCurta);
-    expect(validarFormularioAuth({ modo: 'entrar', ...OK, senha: '123456' })).toBeNull();
-  });
-
-  it('não apara a senha: espaços contam como caracteres', () => {
-    expect(validarFormularioAuth({ modo: 'entrar', ...OK, senha: '      ' })).toBeNull();
-  });
-
-  it('devolve só o primeiro erro, na ordem nome → e-mail → senha', () => {
-    expect(validarFormularioAuth({ modo: 'cadastrar', nome: '', email: '', senha: '' })).toBe(MSG.nome);
-    expect(validarFormularioAuth({ modo: 'cadastrar', nome: 'João', email: 'x', senha: '' })).toBe(MSG.emailInvalido);
-    expect(validarFormularioAuth({ modo: 'entrar', nome: '', email: 'joao@exemplo.com', senha: '1' })).toBe(MSG.senhaCurta);
-  });
-});
-
-// ─── Tela ─────────────────────────────────────────────────────────────────────
 
 describe('AuthScreen', () => {
-  describe('estado inicial', () => {
-    it('abre no modo "Entrar" com e-mail, senha e as ações de acesso', async () => {
+  describe('estrutura inicial (modo Entrar)', () => {
+    it('mostra marca, abas, campos de e-mail e senha e o botão Entrar', async () => {
       await renderizar();
 
-      expect(screen.getByText('Amortiza')).toBeOnTheScreen();
-      expect(screen.getByText('Gestão Operacional & Carteira Macro')).toBeOnTheScreen();
+      expect(screen.getByRole('header', { name: 'Amortiza' })).toBeOnTheScreen();
+      expect(screen.getByText('Suas metas da semana, no seu ritmo.')).toBeOnTheScreen();
       expect(screen.getByRole('tab', { name: 'Entrar' })).toBeSelected();
       expect(screen.getByRole('tab', { name: 'Criar conta' })).not.toBeSelected();
-      expect(screen.getByText(TEXTO_ENTRAR)).toBeOnTheScreen();
-      expect(screen.queryByLabelText('Nome')).not.toBeOnTheScreen();
-      expect(campoEmail()).toHaveDisplayValue('');
-      expect(campoSenha()).toHaveDisplayValue('');
-      expect(screen.getByRole('button', { name: 'Mostrar senha' })).toHaveTextContent('Mostrar');
-      expect(botaoPrincipal()).toHaveAccessibleName('Entrar');
-      expect(within(botaoPrincipal()).getByText('Entrar')).toBeOnTheScreen();
-      expect(screen.getByRole('button', { name: 'Esqueci minha senha' })).toBeEnabled();
+      expect(campoEmail()).toBeOnTheScreen();
+      expect(campoSenha()).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Entrar' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Esqueci minha senha' })).toBeOnTheScreen();
       expect(screen.getByRole('button', { name: 'Continuar sem conta' })).toBeOnTheScreen();
-      expect(screen.getByText('Sem conta, os dados ficam salvos só neste aparelho.')).toBeOnTheScreen();
-      expect(screen.queryByRole('alert')).not.toBeOnTheScreen();
     });
 
-    it('as pílulas de modo ficam em uma lista de abas', async () => {
+    it('o selo "A" da marca é decorativo (oculto para leitores de tela)', async () => {
       await renderizar();
 
-      expect(screen.getAllByRole('tab')).toHaveLength(2);
-      // O contêiner não é "accessible", então não aparece em *ByRole; o papel fica na prop
-      expect(pilula('entrar').parent).toHaveProp('accessibilityRole', 'tablist');
-      expect(pilula('cadastrar').parent).toBe(pilula('entrar').parent);
+      expect(screen.queryByText('A')).not.toBeOnTheScreen();
+      expect(screen.getByText('A', { includeHiddenElements: true }).parent).toHaveStyle({ backgroundColor: cores.primaria });
     });
 
-    it('campos com teclado e preenchimento automático adequados', async () => {
+    it('Entrar | Criar conta é um controle segmentado (tablist) com o segmento ativo destacado', async () => {
+      await renderizar();
+
+      const entrarAba = screen.getByRole('tab', { name: 'Entrar' });
+      expect(entrarAba.parent).toHaveProp('accessibilityRole', 'tablist');
+      expect(entrarAba).toHaveStyle({ backgroundColor: cores.superficieAlta });
+      expect(screen.getByRole('tab', { name: 'Criar conta' })).not.toHaveStyle({ backgroundColor: cores.superficieAlta });
+    });
+
+    it('ordem do mockup: botão primário, "Esqueci minha senha", divisor "ou" e "Continuar sem conta"', async () => {
+      await renderizar();
+
+      const botoes = screen.getAllByRole('button').map((b) => b.props.accessibilityLabel);
+      expect(botoes.slice(-3)).toEqual(['Entrar', 'Esqueci minha senha', 'Continuar sem conta']);
+      expect(screen.getByText('ou')).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Entrar' })).toHaveStyle({ backgroundColor: cores.primaria });
+      expect(screen.getByRole('button', { name: 'Continuar sem conta' })).toHaveStyle({ borderColor: cores.neutro });
+    });
+
+    it('os campos usam o rótulo como nome acessível', async () => {
+      await renderizar();
+
+      expect(screen.getByLabelText('E-mail')).toBe(campoEmail());
+      expect(screen.getByLabelText('Senha')).toBe(campoSenha());
+    });
+
+    it('não mostra o campo Nome no modo Entrar', async () => {
+      await renderizar();
+
+      expect(screen.queryByPlaceholderText('Como quer ser chamado')).not.toBeOnTheScreen();
+      expect(screen.queryByText('Nome')).not.toBeOnTheScreen();
+    });
+
+    it('configura o teclado e o autocompletar dos campos', async () => {
       await renderizar();
 
       expect(campoEmail()).toHaveProp('keyboardType', 'email-address');
       expect(campoEmail()).toHaveProp('autoCapitalize', 'none');
-      expect(campoEmail()).toHaveProp('autoComplete', 'email');
-      expect(campoEmail()).toHaveProp('placeholder', 'seu@email.com');
-      expect(campoSenha()).toHaveProp('secureTextEntry', true);
-      expect(campoSenha()).toHaveProp('autoComplete', 'current-password');
       expect(campoSenha()).toHaveProp('textContentType', 'password');
-      expect(campoSenha()).toHaveProp('placeholder', 'Mínimo 6 caracteres');
-      expect(campoSenha()).toHaveProp('returnKeyType', 'go');
-    });
-
-    it('sem onVoltar não mostra "Voltar" nem escuta o botão voltar do Android', async () => {
-      await renderizar();
-
-      expect(screen.queryByRole('button', { name: 'Voltar' })).not.toBeOnTheScreen();
-      expect(adicionarBackHandler).not.toHaveBeenCalled();
     });
   });
 
-  describe('alternar entre Entrar e Criar conta', () => {
-    it('"Criar conta" mostra o campo Nome, troca textos e esconde "Esqueci minha senha"', async () => {
+  describe('alternar Entrar / Criar conta', () => {
+    it('"Criar conta" mostra o campo Nome, troca o botão e esconde "Esqueci minha senha"', async () => {
       await renderizar();
 
       await irParaCadastro();
 
       expect(screen.getByRole('tab', { name: 'Criar conta' })).toBeSelected();
-      expect(screen.getByRole('tab', { name: 'Entrar' })).not.toBeSelected();
-      expect(screen.getByText(TEXTO_CADASTRAR)).toBeOnTheScreen();
-      expect(campoNome()).toHaveProp('placeholder', 'Como podemos te chamar?');
-      expect(campoNome()).toHaveProp('autoCapitalize', 'words');
-      expect(botaoPrincipal()).toHaveAccessibleName('Criar conta');
-      expect(within(botaoPrincipal()).getByText('Criar conta')).toBeOnTheScreen();
-      expect(screen.queryByRole('button', { name: 'Esqueci minha senha' })).not.toBeOnTheScreen();
-      expect(campoSenha()).toHaveProp('autoComplete', 'new-password');
+      expect(screen.getByText('Nome')).toBeOnTheScreen();
+      expect(campoNome()).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Criar conta' })).toBeOnTheScreen();
+      expect(screen.queryByRole('button', { name: 'Entrar' })).not.toBeOnTheScreen();
+      expect(screen.queryByText('Esqueci minha senha')).not.toBeOnTheScreen();
       expect(campoSenha()).toHaveProp('textContentType', 'newPassword');
     });
 
-    it('voltar para "Entrar" esconde o Nome e mantém e-mail e senha digitados', async () => {
+    it('voltar para "Entrar" esconde o campo Nome', async () => {
       await renderizar();
       await irParaCadastro();
-      await preencher({ nome: 'João', email: 'joao@exemplo.com', senha: 'segredo1' });
 
-      await fireEvent.press(pilula('entrar'));
+      await fireEvent.press(screen.getByRole('tab', { name: 'Entrar' }));
 
-      expect(screen.queryByLabelText('Nome')).not.toBeOnTheScreen();
-      expect(screen.getByText(TEXTO_ENTRAR)).toBeOnTheScreen();
-      expect(campoEmail()).toHaveDisplayValue('joao@exemplo.com');
+      expect(screen.queryByPlaceholderText('Como quer ser chamado')).not.toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Entrar' })).toBeOnTheScreen();
+    });
+
+    it('trocar de aba limpa os erros exibidos', async () => {
+      await renderizar();
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
+      expect(screen.getByText('Informe um e-mail válido.')).toBeOnTheScreen();
+
+      await irParaCadastro();
+
+      expect(screen.queryByText('Informe um e-mail válido.')).not.toBeOnTheScreen();
+    });
+
+    it('mantém o e-mail e a senha digitados ao trocar de aba', async () => {
+      await renderizar();
+      await preencherLogin();
+
+      await irParaCadastro();
+
+      expect(campoEmail()).toHaveDisplayValue('ana@exemplo.com');
       expect(campoSenha()).toHaveDisplayValue('segredo1');
     });
+  });
 
-    it('trocar de modo limpa o erro exibido', async () => {
+  describe('mostrar/ocultar senha', () => {
+    it('a senha começa oculta e alterna com "Mostrar"/"Ocultar" (nomes acessíveis "… senha")', async () => {
       await renderizar();
-      await fireEvent.press(botaoPrincipal());
-      expect(screen.getByRole('alert')).toHaveTextContent(MSG.emailVazio);
+      expect(campoSenha()).toHaveProp('secureTextEntry', true);
+      expect(screen.getByText('Mostrar')).toBeOnTheScreen();
 
-      await irParaCadastro();
+      await fireEvent.press(screen.getByRole('button', { name: 'Mostrar senha' }));
+      expect(campoSenha()).toHaveProp('secureTextEntry', false);
+      expect(screen.getByText('Ocultar')).toBeOnTheScreen();
 
-      expect(screen.queryByRole('alert')).not.toBeOnTheScreen();
+      await fireEvent.press(screen.getByRole('button', { name: 'Ocultar senha' }));
+      expect(campoSenha()).toHaveProp('secureTextEntry', true);
+      expect(screen.getByRole('button', { name: 'Mostrar senha' })).toBeOnTheScreen();
     });
   });
 
-  it('"Mostrar"/"Ocultar" alterna a visibilidade da senha', async () => {
-    await renderizar();
-
-    await fireEvent.press(screen.getByRole('button', { name: 'Mostrar senha' }));
-    expect(campoSenha()).toHaveProp('secureTextEntry', false);
-    expect(screen.getByRole('button', { name: 'Ocultar senha' })).toHaveTextContent('Ocultar');
-
-    await fireEvent.press(screen.getByRole('button', { name: 'Ocultar senha' }));
-    expect(campoSenha()).toHaveProp('secureTextEntry', true);
-    expect(screen.getByRole('button', { name: 'Mostrar senha' })).toBeOnTheScreen();
-  });
-
-  describe('validação no aparelho (sem chamar o serviço)', () => {
-    it.each([
-      [{}, MSG.emailVazio],
-      [{ email: 'joao@exemplo' }, MSG.emailInvalido],
-      [{ email: 'joao@exemplo.com' }, MSG.senhaVazia],
-      [{ email: 'joao@exemplo.com', senha: '12345' }, MSG.senhaCurta],
-    ])('ao entrar com %j mostra "%s"', async (campos, mensagem) => {
+  describe('validação inline (sem chamar o serviço)', () => {
+    it('campos vazios: erro de e-mail e de senha', async () => {
       await renderizar();
-      await preencher(campos);
 
-      await fireEvent.press(botaoPrincipal());
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
 
-      expect(screen.getByRole('alert')).toHaveTextContent(mensagem);
-      expect(entrarMock).not.toHaveBeenCalled();
+      expect(screen.getByText('Informe um e-mail válido.')).toBeOnTheScreen();
+      expect(screen.getByText('A senha precisa ter pelo menos 6 caracteres.')).toBeOnTheScreen();
+      expect(entrar).not.toHaveBeenCalled();
     });
 
-    it('no cadastro exige o nome antes de tudo', async () => {
+    it.each(['ana', 'ana@', 'ana@exemplo', 'ana@exemplo.c', 'ana @exemplo.com'])('e-mail inválido "%s"', async (email) => {
       await renderizar();
-      await irParaCadastro();
-      await preencher({ email: 'joao@exemplo.com', senha: 'segredo1' });
+      await preencherLogin(email, 'segredo1');
 
-      await fireEvent.press(botaoPrincipal());
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
 
-      expect(screen.getByRole('alert')).toHaveTextContent(MSG.nome);
-      expect(cadastrarMock).not.toHaveBeenCalled();
+      expect(screen.getByText('Informe um e-mail válido.')).toBeOnTheScreen();
+      expect(screen.queryByText('A senha precisa ter pelo menos 6 caracteres.')).not.toBeOnTheScreen();
+      expect(entrar).not.toHaveBeenCalled();
     });
 
-    it.each([
-      ['Nome', () => campoNome()],
-      ['E-mail', () => campoEmail()],
-      ['Senha', () => campoSenha()],
-    ])('digitar no campo %s apaga o erro', async (_nome, campo) => {
+    it('senha com menos de 6 caracteres', async () => {
+      await renderizar();
+      await preencherLogin('ana@exemplo.com', '12345');
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
+
+      expect(screen.getByText('A senha precisa ter pelo menos 6 caracteres.')).toBeOnTheScreen();
+      expect(screen.queryByText('Informe um e-mail válido.')).not.toBeOnTheScreen();
+      expect(entrar).not.toHaveBeenCalled();
+    });
+
+    it('no cadastro, nome vazio (ou só espaços) é obrigatório', async () => {
       await renderizar();
       await irParaCadastro();
-      await fireEvent.press(botaoPrincipal());
-      expect(screen.getByRole('alert')).toHaveTextContent(MSG.nome);
+      await fireEvent.changeText(campoNome(), '   ');
+      await preencherLogin();
 
-      await fireEvent.changeText(campo(), 'a');
+      await fireEvent.press(screen.getByRole('button', { name: 'Criar conta' }));
 
-      expect(screen.queryByRole('alert')).not.toBeOnTheScreen();
+      expect(screen.getByText('Informe seu nome.')).toBeOnTheScreen();
+      expect(cadastrar).not.toHaveBeenCalled();
+    });
+
+    it('no cadastro, valida nome, e-mail e senha ao mesmo tempo', async () => {
+      await renderizar();
+      await irParaCadastro();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Criar conta' }));
+
+      expect(screen.getByText('Informe seu nome.')).toBeOnTheScreen();
+      expect(screen.getByText('Informe um e-mail válido.')).toBeOnTheScreen();
+      expect(screen.getByText('A senha precisa ter pelo menos 6 caracteres.')).toBeOnTheScreen();
+      expect(cadastrar).not.toHaveBeenCalled();
+    });
+
+    it('corrigir os campos e reenviar remove os erros antigos', async () => {
+      await renderizar();
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
+
+      await preencherLogin();
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
+
+      expect(screen.queryByText('Informe um e-mail válido.')).not.toBeOnTheScreen();
+      expect(screen.queryByText('A senha precisa ter pelo menos 6 caracteres.')).not.toBeOnTheScreen();
+      expect(entrar).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('entrar', () => {
-    it('envia e-mail e senha como digitados e não mostra erro no sucesso', async () => {
+    it('com sucesso, chama entrar(email sem espaços, senha) e não mostra erro', async () => {
       await renderizar();
-      await preencher({ email: ' Joao@Exemplo.com ', senha: 'segredo1' });
+      await preencherLogin('  ana@exemplo.com  ', 'segredo1');
 
-      await fireEvent.press(botaoPrincipal());
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
 
-      expect(entrarMock).toHaveBeenCalledTimes(1);
-      expect(entrarMock).toHaveBeenCalledWith(' Joao@Exemplo.com ', 'segredo1');
-      expect(cadastrarMock).not.toHaveBeenCalled();
-      expect(screen.queryByRole('alert')).not.toBeOnTheScreen();
-      // A troca de tela vem da sessão (App); aqui o formulário só volta a ficar disponível
-      expect(botaoPrincipal()).toBeEnabled();
+      expect(entrar).toHaveBeenCalledTimes(1);
+      expect(entrar).toHaveBeenCalledWith('ana@exemplo.com', 'segredo1');
+      expect(cadastrar).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'Entrar' })).toBeEnabled();
     });
 
-    it('mostra na tela o erro devolvido pelo serviço', async () => {
-      entrarMock.mockResolvedValueOnce({ success: false, error: 'E-mail ou senha incorretos.' });
+    it('a senha é enviada exatamente como digitada (sem trim)', async () => {
       await renderizar();
-      await preencher({ email: 'joao@exemplo.com', senha: 'errada1' });
+      await preencherLogin('ana@exemplo.com', ' com espaço ');
 
-      await fireEvent.press(botaoPrincipal());
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
 
-      expect(screen.getByRole('alert')).toHaveTextContent('E-mail ou senha incorretos.');
-      expect(botaoPrincipal()).toBeEnabled();
-      expect(campoSenha()).toHaveDisplayValue('errada1');
+      expect(entrar).toHaveBeenCalledWith('ana@exemplo.com', ' com espaço ');
     });
 
-    it('a tecla "go" do teclado na senha também envia', async () => {
+    it('erro do serviço aparece na tela', async () => {
+      jest.mocked(entrar).mockResolvedValue({ success: false, error: 'E-mail ou senha incorretos.' });
       await renderizar();
-      await preencher({ email: 'joao@exemplo.com', senha: 'segredo1' });
+      await preencherLogin();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
+
+      expect(screen.getByText('E-mail ou senha incorretos.')).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Entrar' })).toBeEnabled();
+    });
+
+    it('o erro do serviço aparece numa faixa com papel de alerta', async () => {
+      jest.mocked(entrar).mockResolvedValue({ success: false, error: 'E-mail ou senha incorretos.' });
+      await renderizar();
+      await preencherLogin();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Entrar' }));
+
+      const alerta = screen.getByRole('alert');
+      expect(alerta).toHaveTextContent('E-mail ou senha incorretos.');
+      expect(alerta).toHaveStyle({ backgroundColor: cores.erroSuave });
+    });
+
+    it('confirmar no teclado (submitEditing da senha) também envia', async () => {
+      await renderizar();
+      await preencherLogin();
 
       await fireEvent(campoSenha(), 'submitEditing');
 
-      expect(entrarMock).toHaveBeenCalledWith('joao@exemplo.com', 'segredo1');
+      expect(entrar).toHaveBeenCalledWith('ana@exemplo.com', 'segredo1');
     });
 
-    it('a tecla "próximo" passa do e-mail para a senha', async () => {
+    it('o botão fica desabilitado e com carregamento enquanto a promise está pendente', async () => {
+      const pendente = deferred<Awaited<ReturnType<typeof entrar>>>();
+      jest.mocked(entrar).mockReturnValue(pendente.promise);
       await renderizar();
+      await preencherLogin();
+      const botao = screen.getByRole('button', { name: 'Entrar' });
 
-      await fireEvent(campoEmail(), 'submitEditing');
+      // Não aguardamos o press: o handler só termina quando a promise resolver.
+      const envio = fireEvent.press(botao);
+      await waitFor(() => expect(botao).toBeDisabled());
+      expect(indicadoresDeCarregamento()).toHaveLength(1);
+      // Durante o carregamento o botão continua achável pelo nome e anuncia que está ocupado.
+      expect(screen.getByRole('button', { name: 'Entrar' })).toBeBusy();
+      expect(screen.getByRole('button', { name: 'Esqueci minha senha' })).toBeDisabled();
 
-      expect(focoDoTextInput).toHaveBeenCalledTimes(1);
-      const [campoFocado] = focoDoTextInput.mock.contexts as Array<{ props: { accessibilityLabel?: string } }>;
-      expect(campoFocado.props.accessibilityLabel).toBe('Senha');
-      expect(entrarMock).not.toHaveBeenCalled();
+      // Toques extras no botão e no "Esqueci minha senha" são ignorados.
+      await fireEvent.press(botao);
+      await fireEvent.press(screen.getByText('Esqueci minha senha'));
+      expect(entrar).toHaveBeenCalledTimes(1);
+      expect(recuperarSenha).not.toHaveBeenCalled();
+
+      await act(async () => pendente.resolve({ success: false, error: 'Sem conexão com a internet. Verifique sua rede.' }));
+      await envio;
+
+      expect(screen.getByRole('button', { name: 'Entrar' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Entrar' })).not.toBeBusy();
+      expect(indicadoresDeCarregamento()).toHaveLength(0);
+      expect(screen.getByText('Sem conexão com a internet. Verifique sua rede.')).toBeOnTheScreen();
     });
 
-    it('durante o envio bloqueia botão, abas, campos e link; envio duplo (botão ou teclado) é ignorado', async () => {
-      const pendente = adiado<ResultadoServico<Usuario>>();
-      entrarMock.mockReturnValueOnce(pendente.promessa);
-      await renderizar();
-      await preencher({ email: 'joao@exemplo.com', senha: 'segredo1' });
-
-      const envio = fireEvent.press(botaoPrincipal());
-      await waitFor(() => expect(botaoPrincipal()).toBeDisabled());
-
-      expect(botaoPrincipal()).toBeBusy();
-      expect(within(botaoPrincipal()).queryByText('Entrar')).not.toBeOnTheScreen();
-      expect(botaoPrincipal().queryAll((el) => el.type === 'ActivityIndicator')).toHaveLength(1);
-      expect(pilula('entrar')).toBeDisabled();
-      expect(pilula('cadastrar')).toBeDisabled();
-      expect(campoEmail()).toHaveProp('editable', false);
-      expect(campoSenha()).toHaveProp('editable', false);
-      expect(linkEsqueci()).toBeDisabled();
-
-      // Segundo toque no botão (desabilitado) e "go" do teclado chamando o handler direto
-      await fireEvent.press(botaoPrincipal());
-      await act(async () => {
-        campoSenha().props.onSubmitEditing();
+    // BUG documentado (ver relatório): enviar() não verifica `carregando`. Com o botão já desabilitado,
+    // o "done" do teclado (onSubmitEditing do campo de senha) dispara um segundo entrar().
+    it('confirmar pelo teclado durante um envio pendente não chama entrar() de novo', async () => {
+      const pendentes: Array<ReturnType<typeof deferred<Awaited<ReturnType<typeof entrar>>>>> = [];
+      jest.mocked(entrar).mockImplementation(() => {
+        const p = deferred<Awaited<ReturnType<typeof entrar>>>();
+        pendentes.push(p);
+        return p.promise;
       });
-      expect(entrarMock).toHaveBeenCalledTimes(1);
+      await renderizar();
+      await preencherLogin();
+      const botao = screen.getByRole('button', { name: 'Entrar' });
+      const envio = fireEvent.press(botao);
+      await waitFor(() => expect(botao).toBeDisabled());
 
-      await act(async () => pendente.resolver({ success: true, data: USUARIO }));
+      // Com o botão desabilitado, o usuário confirma pelo teclado.
+      const envioTeclado = fireEvent(campoSenha(), 'submitEditing');
+      await waitFor(() => expect(botao).toBeDisabled()); // deixa o evento do teclado assentar
+      await act(async () => pendentes.forEach((p) => p.resolve({ success: true, data: USUARIO })));
       await envio;
+      await envioTeclado;
 
-      expect(botaoPrincipal()).toBeEnabled();
-      expect(botaoPrincipal()).not.toBeBusy();
-      expect(within(botaoPrincipal()).getByText('Entrar')).toBeOnTheScreen();
-      expect(campoEmail()).toHaveProp('editable', true);
-      expect(spinners()).toHaveLength(0);
-    });
-
-    it('"Continuar sem conta" continua disponível durante o envio', async () => {
-      const pendente = adiado<ResultadoServico<Usuario>>();
-      entrarMock.mockReturnValueOnce(pendente.promessa);
-      const { onContinuarSemConta } = await renderizar();
-      await preencher({ email: 'joao@exemplo.com', senha: 'segredo1' });
-
-      const envio = fireEvent.press(botaoPrincipal());
-      await waitFor(() => expect(botaoPrincipal()).toBeDisabled());
-      await fireEvent.press(screen.getByRole('button', { name: 'Continuar sem conta' }));
-
-      expect(onContinuarSemConta).toHaveBeenCalledTimes(1);
-      await act(async () => pendente.resolver({ success: true, data: USUARIO }));
-      await envio;
+      expect(entrar).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('criar conta', () => {
-    it('envia e-mail, senha e nome ao serviço', async () => {
-      await renderizar();
+    async function preencherCadastro() {
       await irParaCadastro();
-      await preencher({ nome: 'João Silva', email: 'joao@exemplo.com', senha: 'segredo1' });
+      await fireEvent.changeText(campoNome(), '  Ana  ');
+      await preencherLogin(' ana@exemplo.com ', 'segredo1');
+    }
 
-      await fireEvent.press(botaoPrincipal());
+    it('chama cadastrar(email, senha, nome) com espaços removidos de e-mail e nome', async () => {
+      await renderizar();
+      await preencherCadastro();
 
-      expect(cadastrarMock).toHaveBeenCalledTimes(1);
-      expect(cadastrarMock).toHaveBeenCalledWith('joao@exemplo.com', 'segredo1', 'João Silva');
-      expect(entrarMock).not.toHaveBeenCalled();
+      await fireEvent.press(screen.getByRole('button', { name: 'Criar conta' }));
+
+      expect(cadastrar).toHaveBeenCalledTimes(1);
+      expect(cadastrar).toHaveBeenCalledWith('ana@exemplo.com', 'segredo1', 'Ana');
+      expect(entrar).not.toHaveBeenCalled();
     });
 
-    it('a tecla "próximo" passa do nome para o e-mail', async () => {
+    it('quando precisa confirmar o e-mail, mostra o aviso e o botão para voltar ao login', async () => {
       await renderizar();
-      await irParaCadastro();
+      await preencherCadastro();
 
-      await fireEvent(campoNome(), 'submitEditing');
-
-      const [campoFocado] = focoDoTextInput.mock.contexts as Array<{ props: { accessibilityLabel?: string } }>;
-      expect(campoFocado.props.accessibilityLabel).toBe('E-mail');
-    });
-
-    it('sem confirmação de e-mail (sessão criada) permanece no formulário até o App trocar de tela', async () => {
-      await renderizar();
-      await irParaCadastro();
-      await preencher({ nome: 'João', email: 'joao@exemplo.com', senha: 'segredo1' });
-
-      await fireEvent.press(botaoPrincipal());
-
-      expect(screen.queryByText('Confirme seu e-mail')).not.toBeOnTheScreen();
-      expect(screen.queryByRole('alert')).not.toBeOnTheScreen();
-      expect(botaoPrincipal()).toBeEnabled();
-    });
-
-    it('mostra o erro do serviço e continua no modo cadastro', async () => {
-      cadastrarMock.mockResolvedValueOnce({ success: false, error: 'Este e-mail já está cadastrado. Tente entrar.' });
-      await renderizar();
-      await irParaCadastro();
-      await preencher({ nome: 'João', email: 'joao@exemplo.com', senha: 'segredo1' });
-
-      await fireEvent.press(botaoPrincipal());
-
-      expect(screen.getByRole('alert')).toHaveTextContent('Este e-mail já está cadastrado. Tente entrar.');
-      expect(screen.getByRole('tab', { name: 'Criar conta' })).toBeSelected();
-      expect(campoNome()).toHaveDisplayValue('João');
-    });
-
-    it('com confirmação pendente mostra "Confirme seu e-mail" com o e-mail normalizado', async () => {
-      cadastrarMock.mockResolvedValueOnce({ success: true, data: { precisaConfirmarEmail: true } });
-      const { onContinuarSemConta } = await renderizar();
-      await irParaCadastro();
-      await preencher({ nome: 'João', email: '  Joao@Exemplo.COM ', senha: 'segredo1' });
-
-      await fireEvent.press(botaoPrincipal());
+      await fireEvent.press(screen.getByRole('button', { name: 'Criar conta' }));
 
       expect(screen.getByText('Confirme seu e-mail')).toBeOnTheScreen();
       expect(
-        screen.getByText(
-          'Enviamos um link de confirmação para joao@exemplo.com. Abra o e-mail, confirme o cadastro e depois entre com sua senha.'
-        )
+        screen.getByText('Enviamos um link para ana@exemplo.com. Abra o e-mail, confirme e volte para entrar.'),
       ).toBeOnTheScreen();
-      expect(screen.getByRole('button', { name: 'Voltar para o login' })).toBeOnTheScreen();
-      // O formulário some, mas "Continuar sem conta" segue disponível
+      // O e-mail aparece em destaque dentro do texto.
+      expect(screen.getByText('ana@exemplo.com')).toHaveStyle({ color: cores.texto, fontWeight: '700' });
+      // O círculo com ✓ é decorativo.
+      expect(screen.getByText('✓', { includeHiddenElements: true }).parent).toHaveStyle({ backgroundColor: cores.primariaSuave });
+      // O formulário (e o "Continuar sem conta") some enquanto o aviso está visível.
       expect(screen.queryByRole('tab')).not.toBeOnTheScreen();
-      expect(screen.queryByLabelText('E-mail')).not.toBeOnTheScreen();
-      expect(screen.queryByTestId('auth-botao-principal')).not.toBeOnTheScreen();
-      await fireEvent.press(screen.getByRole('button', { name: 'Continuar sem conta' }));
-      expect(onContinuarSemConta).toHaveBeenCalledTimes(1);
+      expect(screen.queryByPlaceholderText('voce@exemplo.com')).not.toBeOnTheScreen();
+      expect(screen.queryByText('Continuar sem conta')).not.toBeOnTheScreen();
     });
 
-    it('"Voltar para o login" reabre o formulário em "Entrar", mantendo o e-mail e limpando a senha', async () => {
-      cadastrarMock.mockResolvedValueOnce({ success: true, data: { precisaConfirmarEmail: true } });
+    it('"Voltar para entrar" volta ao formulário no modo Entrar, mantendo o e-mail', async () => {
       await renderizar();
-      await irParaCadastro();
-      await preencher({ nome: 'João', email: 'joao@exemplo.com', senha: 'segredo1' });
-      await fireEvent.press(botaoPrincipal());
+      await preencherCadastro();
+      await fireEvent.press(screen.getByRole('button', { name: 'Criar conta' }));
 
-      await fireEvent.press(screen.getByRole('button', { name: 'Voltar para o login' }));
+      await fireEvent.press(screen.getByRole('button', { name: 'Voltar para entrar' }));
 
       expect(screen.queryByText('Confirme seu e-mail')).not.toBeOnTheScreen();
       expect(screen.getByRole('tab', { name: 'Entrar' })).toBeSelected();
-      expect(screen.queryByLabelText('Nome')).not.toBeOnTheScreen();
-      expect(campoEmail()).toHaveDisplayValue('joao@exemplo.com');
-      expect(campoSenha()).toHaveDisplayValue('');
-      expect(screen.queryByRole('alert')).not.toBeOnTheScreen();
+      expect(screen.queryByPlaceholderText('Como quer ser chamado')).not.toBeOnTheScreen();
+      expect(campoEmail()).toHaveDisplayValue(' ana@exemplo.com ');
+    });
+
+    it('quando não precisa confirmar o e-mail, permanece no formulário (o App troca de tela pela sessão)', async () => {
+      jest.mocked(cadastrar).mockResolvedValue({ success: true, data: { precisaConfirmarEmail: false } });
+      await renderizar();
+      await preencherCadastro();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Criar conta' }));
+
+      expect(screen.queryByText('Confirme seu e-mail')).not.toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Criar conta' })).toBeEnabled();
+    });
+
+    it('erro do serviço aparece na tela', async () => {
+      jest.mocked(cadastrar).mockResolvedValue({ success: false, error: 'Este e-mail já está cadastrado. Tente entrar.' });
+      await renderizar();
+      await preencherCadastro();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Criar conta' }));
+
+      expect(screen.getByText('Este e-mail já está cadastrado. Tente entrar.')).toBeOnTheScreen();
+      expect(screen.queryByText('Confirme seu e-mail')).not.toBeOnTheScreen();
+    });
+
+    it('o botão fica desabilitado enquanto o cadastro está pendente', async () => {
+      const pendente = deferred<Awaited<ReturnType<typeof cadastrar>>>();
+      jest.mocked(cadastrar).mockReturnValue(pendente.promise);
+      await renderizar();
+      await preencherCadastro();
+      const botao = screen.getByRole('button', { name: 'Criar conta' });
+
+      const envio = fireEvent.press(botao);
+      await waitFor(() => expect(botao).toBeDisabled());
+      await fireEvent.press(botao);
+      expect(cadastrar).toHaveBeenCalledTimes(1);
+
+      await act(async () => pendente.resolve({ success: true, data: { precisaConfirmarEmail: true } }));
+      await envio;
+      expect(screen.getByText('Confirme seu e-mail')).toBeOnTheScreen();
     });
   });
 
   describe('recuperar senha', () => {
-    it('sem e-mail pede para digitá-lo, sem chamar o serviço', async () => {
+    it('sem e-mail válido, pede o e-mail e não chama o serviço', async () => {
       await renderizar();
+      await fireEvent.changeText(campoEmail(), 'ana@');
 
-      await fireEvent.press(screen.getByRole('button', { name: 'Esqueci minha senha' }));
+      await fireEvent.press(screen.getByText('Esqueci minha senha'));
 
-      expect(screen.getByRole('alert')).toHaveTextContent(MSG.emailParaRecuperar);
-      expect(recuperarSenhaMock).not.toHaveBeenCalled();
+      expect(screen.getByText('Digite seu e-mail para recuperar a senha.')).toBeOnTheScreen();
+      expect(recuperarSenha).not.toHaveBeenCalled();
     });
 
-    it('com e-mail inválido avisa, sem chamar o serviço', async () => {
+    it('com e-mail válido, chama recuperarSenha e mostra a confirmação', async () => {
       await renderizar();
-      await preencher({ email: 'joao@' });
+      await fireEvent.changeText(campoEmail(), ' ana@exemplo.com ');
 
-      await fireEvent.press(screen.getByRole('button', { name: 'Esqueci minha senha' }));
+      await fireEvent.press(screen.getByText('Esqueci minha senha'));
 
-      expect(screen.getByRole('alert')).toHaveTextContent(MSG.emailInvalido);
-      expect(recuperarSenhaMock).not.toHaveBeenCalled();
-    });
-
-    it('envia o link e confirma para qual e-mail (normalizado) ele foi enviado', async () => {
-      await renderizar();
-      await preencher({ email: ' Joao@Exemplo.com ' });
-
-      await fireEvent.press(screen.getByRole('button', { name: 'Esqueci minha senha' }));
-
-      expect(recuperarSenhaMock).toHaveBeenCalledWith(' Joao@Exemplo.com ');
+      expect(recuperarSenha).toHaveBeenCalledTimes(1);
+      expect(recuperarSenha).toHaveBeenCalledWith('ana@exemplo.com');
+      expect(screen.getByText('Link enviado')).toBeOnTheScreen();
       expect(
-        screen.getByText(
-          'Enviamos um link para redefinir a senha para joao@exemplo.com. Verifique sua caixa de entrada.'
-        )
+        screen.getByText('Se ana@exemplo.com estiver cadastrado, você receberá um e-mail para redefinir a senha.'),
       ).toBeOnTheScreen();
-      expect(screen.queryByRole('alert')).not.toBeOnTheScreen();
-      expect(entrarMock).not.toHaveBeenCalled();
     });
 
-    it('mostra o erro do serviço', async () => {
-      recuperarSenhaMock.mockResolvedValueOnce({
-        success: false,
-        error: 'Muitas tentativas. Aguarde um instante e tente novamente.',
-      });
+    it('"Voltar" na confirmação retorna ao formulário', async () => {
       await renderizar();
-      await preencher({ email: 'joao@exemplo.com' });
-
-      await fireEvent.press(screen.getByRole('button', { name: 'Esqueci minha senha' }));
-
-      expect(screen.getByRole('alert')).toHaveTextContent('Muitas tentativas. Aguarde um instante e tente novamente.');
-      expect(screen.queryByText(/^Enviamos um link/)).not.toBeOnTheScreen();
-    });
-
-    it('durante o envio mostra "Enviando..." e bloqueia o formulário (sem indicador no botão principal)', async () => {
-      const pendente = adiado<ResultadoServico>();
-      recuperarSenhaMock.mockReturnValueOnce(pendente.promessa);
-      await renderizar();
-      await preencher({ email: 'joao@exemplo.com', senha: 'segredo1' });
-
-      const envio = fireEvent.press(screen.getByRole('button', { name: 'Esqueci minha senha' }));
-      await waitFor(() => expect(linkEsqueci()).toHaveTextContent('Enviando...'));
-
-      expect(linkEsqueci()).toBeDisabled();
-      expect(botaoPrincipal()).toBeDisabled();
-      expect(botaoPrincipal()).not.toBeBusy();
-      expect(spinners()).toHaveLength(0);
-      await fireEvent.press(botaoPrincipal());
-      expect(entrarMock).not.toHaveBeenCalled();
-
-      await act(async () => pendente.resolver({ success: true, data: undefined }));
-      await envio;
-
-      expect(linkEsqueci()).toHaveTextContent('Esqueci minha senha');
-      expect(linkEsqueci()).toBeEnabled();
-    });
-
-    it('o aviso de link enviado some ao enviar o formulário ou trocar de modo', async () => {
-      await renderizar();
-      await preencher({ email: 'joao@exemplo.com' });
-      await fireEvent.press(screen.getByRole('button', { name: 'Esqueci minha senha' }));
-      expect(screen.getByText(/^Enviamos um link/)).toBeOnTheScreen();
-
-      await fireEvent.press(botaoPrincipal()); // falha na validação (sem senha)
-      expect(screen.queryByText(/^Enviamos um link/)).not.toBeOnTheScreen();
-
-      await fireEvent.press(screen.getByRole('button', { name: 'Esqueci minha senha' }));
-      expect(screen.getByText(/^Enviamos um link/)).toBeOnTheScreen();
-      await irParaCadastro();
-      expect(screen.queryByText(/^Enviamos um link/)).not.toBeOnTheScreen();
-    });
-  });
-
-  it('"Continuar sem conta" chama onContinuarSemConta sem usar o serviço', async () => {
-    const { onContinuarSemConta } = await renderizar();
-
-    await fireEvent.press(screen.getByRole('button', { name: 'Continuar sem conta' }));
-
-    expect(onContinuarSemConta).toHaveBeenCalledTimes(1);
-    expect(entrarMock).not.toHaveBeenCalled();
-    expect(cadastrarMock).not.toHaveBeenCalled();
-  });
-
-  describe('aberta pelo menu (com onVoltar)', () => {
-    it('mostra "Voltar", que chama onVoltar', async () => {
-      const onVoltar = jest.fn();
-      await renderizar({ onVoltar });
+      await fireEvent.changeText(campoEmail(), 'ana@exemplo.com');
+      await fireEvent.press(screen.getByText('Esqueci minha senha'));
 
       await fireEvent.press(screen.getByRole('button', { name: 'Voltar' }));
 
-      expect(onVoltar).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText('Link enviado')).not.toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Entrar' })).toBeOnTheScreen();
     });
 
-    it('o botão voltar do Android chama onVoltar e é consumido', async () => {
+    it('erro do serviço aparece na tela e mantém o formulário', async () => {
+      jest.mocked(recuperarSenha).mockResolvedValue({ success: false, error: 'Muitas tentativas. Aguarde um instante e tente novamente.' });
+      await renderizar();
+      await fireEvent.changeText(campoEmail(), 'ana@exemplo.com');
+
+      await fireEvent.press(screen.getByText('Esqueci minha senha'));
+
+      expect(screen.getByText('Muitas tentativas. Aguarde um instante e tente novamente.')).toBeOnTheScreen();
+      expect(screen.queryByText('Link enviado')).not.toBeOnTheScreen();
+    });
+  });
+
+  describe('rodapé', () => {
+    it('"Continuar sem conta" chama o callback correspondente', async () => {
+      const { onContinuarSemConta } = await renderizar();
+
+      await fireEvent.press(screen.getByText('Continuar sem conta'));
+
+      expect(onContinuarSemConta).toHaveBeenCalledTimes(1);
+      expect(entrar).not.toHaveBeenCalled();
+    });
+
+    it('aberta de dentro do app (onVoltar), mostra "Voltar" no lugar de "Continuar sem conta"', async () => {
       const onVoltar = jest.fn();
-      await renderizar({ onVoltar });
+      const { onContinuarSemConta } = await renderizar({ onVoltar });
 
-      expect(adicionarBackHandler).toHaveBeenCalledWith('hardwareBackPress', expect.any(Function));
-      const consumido = handlersVoltar[handlersVoltar.length - 1]();
+      expect(screen.queryByText('Continuar sem conta')).not.toBeOnTheScreen();
+      // Sem o divisor "ou": "Voltar" é um botão de texto discreto.
+      expect(screen.queryByText('ou')).not.toBeOnTheScreen();
+      await fireEvent.press(screen.getByRole('button', { name: 'Voltar' }));
 
-      expect(consumido).toBe(true);
       expect(onVoltar).toHaveBeenCalledTimes(1);
-    });
-
-    it('para de escutar o botão voltar do Android ao desmontar', async () => {
-      await renderizar({ onVoltar: jest.fn() });
-      expect(removerBackHandler).not.toHaveBeenCalled();
-
-      await screen.unmount();
-
-      expect(removerBackHandler).toHaveBeenCalledTimes(1);
-    });
-
-    it('para de escutar quando onVoltar deixa de ser informado', async () => {
-      const onContinuarSemConta = jest.fn();
-      await render(<AuthScreen onContinuarSemConta={onContinuarSemConta} onVoltar={jest.fn()} />);
-
-      await screen.rerender(<AuthScreen onContinuarSemConta={onContinuarSemConta} />);
-
-      expect(removerBackHandler).toHaveBeenCalledTimes(1);
-      expect(screen.queryByRole('button', { name: 'Voltar' })).not.toBeOnTheScreen();
+      expect(onContinuarSemConta).not.toHaveBeenCalled();
     });
   });
 });

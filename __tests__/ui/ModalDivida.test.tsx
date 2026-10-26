@@ -1,158 +1,245 @@
-// Testes de src/components/ModalDivida.tsx: bottom sheet de cadastro de dívida (diária, mensal ou imprevista).
-
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react-native';
-import { ModalDivida, type ModalDividaProps } from '../../src/components/ModalDivida';
-import { cores } from '../../src/theme';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { ModalDivida } from '../../src/components/ModalDivida';
+import { DividaItem } from '../../src/types';
 
-type Tipo = ModalDividaProps['tipo'];
+type Props = React.ComponentProps<typeof ModalDivida>;
+type Tipo = DividaItem['tipo'];
 
-async function renderizar(props: Partial<ModalDividaProps> = {}) {
-  const callbacks = {
-    onAlterarFrequencia: jest.fn(),
-    onAlterarDescricao: jest.fn(),
-    onAlterarValor: jest.fn(),
-    onSalvar: jest.fn(),
+const PLACEHOLDER: Record<Tipo, string> = {
+  diaria: 'Ex.: Combustível, almoço',
+  mensal: 'Ex.: Parcela do carro, seguro',
+  imprevista: 'Ex.: Manutenção do pneu',
+};
+
+const indicadoresDeCarregamento = () =>
+  screen.container.queryAll((el) => el.type === 'ActivityIndicator');
+
+async function renderizar(over: Partial<Props> = {}) {
+  const props: Props = {
+    visivel: true,
+    tipo: 'diaria',
     onFechar: jest.fn(),
+    onSalvar: jest.fn().mockResolvedValue(undefined),
+    ...over,
   };
-  await render(
-    <ModalDivida visivel tipo="diaria" frequencia="anual" descricao="" valor="" {...callbacks} {...props} />
-  );
-  return callbacks;
+  await render(<ModalDivida {...props} />);
+  return props;
 }
 
-const modaisAbertos = () => screen.container.queryAll((el) => el.type === 'Modal');
-const campoValor = () => screen.getByPlaceholderText('0.00');
-
-/** A pílula é o TouchableOpacity que envolve o texto. */
-const pilula = (texto: string) => screen.getByText(texto).parent;
-
-const PILULA_ATIVA = { backgroundColor: cores.primaria, borderColor: cores.primaria };
-const PILULA_INATIVA = { backgroundColor: cores.superficieAlta, borderColor: cores.neutro };
+const campoDescricao = (tipo: Tipo = 'diaria') => screen.getByPlaceholderText(PLACEHOLDER[tipo]);
+const campoValor = () => screen.getByPlaceholderText('0,00');
 
 describe('ModalDivida', () => {
-  it('não mostra nada quando está fechado', async () => {
+  it('invisível, não renderiza nada', async () => {
     await renderizar({ visivel: false });
 
-    expect(modaisAbertos()).toHaveLength(0);
-    expect(screen.queryByText('Salvar Dívida')).not.toBeOnTheScreen();
+    expect(screen.queryByText('Gasto diário')).not.toBeOnTheScreen();
   });
 
-  it('abre como bottom sheet transparente com animação de slide', async () => {
-    await renderizar();
-
-    const [modal] = modaisAbertos();
-    expect(modal).toHaveProp('transparent', true);
-    expect(modal).toHaveProp('animationType', 'slide');
-  });
-
-  it.each<[Tipo, string, string]>([
-    ['diaria', 'Cadastrar Gasto Diário', 'Ex: Combustível, Almoço'],
-    ['mensal', 'Cadastrar Dívida Mensal', 'Ex: Parcela do Carro, Seguro'],
-    ['imprevista', 'Lançar Dívida Imprevista', 'Ex: Manutenção inesperada do pneu'],
-  ])('tipo %s: título "%s" e exemplo "%s" na descrição', async (tipo, titulo, placeholder) => {
+  it.each<[Tipo, string]>([
+    ['diaria', 'Gasto diário'],
+    ['mensal', 'Dívida mensal'],
+    ['imprevista', 'Imprevisto'],
+  ])('tipo "%s" mostra o título "%s" e o placeholder do tipo, sem texto explicativo', async (tipo, titulo) => {
     await renderizar({ tipo });
 
     expect(screen.getByText(titulo)).toBeOnTheScreen();
-    expect(screen.getByPlaceholderText(placeholder)).toBeOnTheScreen();
-  });
-
-  it('mostra o aviso de recálculo, os rótulos e os botões', async () => {
-    await renderizar();
-
-    expect(screen.getByText('A dívida anual projetada atualizará automaticamente.')).toBeOnTheScreen();
-    expect(screen.getByText('Descrição da Dívida / Gasto:')).toBeOnTheScreen();
-    expect(screen.getByText('Valor (R$):')).toBeOnTheScreen();
-    expect(screen.getByText('Salvar Dívida')).toBeOnTheScreen();
-    expect(screen.getByText('Cancelar')).toBeOnTheScreen();
-  });
-
-  it.each<Tipo>(['diaria', 'mensal'])('tipo %s não tem seletor de frequência', async (tipo) => {
-    await renderizar({ tipo });
-
-    expect(screen.queryByText('Frequência do Imprevisto:')).not.toBeOnTheScreen();
-    expect(screen.queryByText('Anual / Única')).not.toBeOnTheScreen();
-  });
-
-  it('tipo imprevista mostra o seletor de frequência com as três opções', async () => {
-    await renderizar({ tipo: 'imprevista' });
-
-    expect(screen.getByText('Frequência do Imprevisto:')).toBeOnTheScreen();
-    expect(screen.getByText('Diária')).toBeOnTheScreen();
-    expect(screen.getByText('Mensal')).toBeOnTheScreen();
-    expect(screen.getByText('Anual / Única')).toBeOnTheScreen();
-  });
-
-  it.each<[string, 'diaria' | 'mensal' | 'anual']>([
-    ['Diária', 'diaria'],
-    ['Mensal', 'mensal'],
-    ['Anual / Única', 'anual'],
-  ])('a pílula "%s" chama onAlterarFrequencia("%s")', async (texto, frequencia) => {
-    const { onAlterarFrequencia } = await renderizar({ tipo: 'imprevista', frequencia: 'anual' });
-
-    await fireEvent.press(screen.getByText(texto));
-
-    expect(onAlterarFrequencia).toHaveBeenCalledTimes(1);
-    expect(onAlterarFrequencia).toHaveBeenCalledWith(frequencia);
-  });
-
-  it('destaca somente a frequência selecionada', async () => {
-    await renderizar({ tipo: 'imprevista', frequencia: 'mensal' });
-
-    expect(pilula('Mensal')).toHaveStyle(PILULA_ATIVA);
-    expect(screen.getByText('Mensal')).toHaveStyle({ color: cores.primariaTexto });
-    expect(pilula('Diária')).toHaveStyle(PILULA_INATIVA);
-    expect(pilula('Anual / Única')).toHaveStyle(PILULA_INATIVA);
-    expect(screen.getByText('Diária')).toHaveStyle({ color: cores.textoSuave });
-  });
-
-  it('exibe a descrição e o valor recebidos por props', async () => {
-    await renderizar({ tipo: 'mensal', descricao: 'Seguro do carro', valor: '189,90' });
-
-    expect(screen.getByPlaceholderText('Ex: Parcela do Carro, Seguro')).toHaveDisplayValue('Seguro do carro');
-    expect(campoValor()).toHaveDisplayValue('189,90');
-  });
-
-  it('o campo de descrição recebe foco automático e o de valor usa teclado numérico', async () => {
-    await renderizar();
-
-    expect(screen.getByPlaceholderText('Ex: Combustível, Almoço')).toHaveProp('autoFocus', true);
+    expect(screen.queryByText('A projeção anual recalcula sozinha.')).not.toBeOnTheScreen();
+    expect(campoDescricao(tipo)).toBeOnTheScreen();
+    expect(screen.getByText('Descrição')).toBeOnTheScreen();
+    expect(screen.getByText('Valor (R$)')).toBeOnTheScreen();
     expect(campoValor()).toHaveProp('keyboardType', 'numeric');
   });
 
-  it('repassa o texto digitado na descrição e no valor', async () => {
-    const { onAlterarDescricao, onAlterarValor } = await renderizar();
+  describe('frequência do imprevisto', () => {
+    it.each<Tipo>(['diaria', 'mensal'])('não aparece para o tipo "%s"', async (tipo) => {
+      await renderizar({ tipo });
 
-    await fireEvent.changeText(screen.getByPlaceholderText('Ex: Combustível, Almoço'), 'Combustível');
-    await fireEvent.changeText(campoValor(), '45,50');
+      expect(screen.queryByRole('button', { name: 'Diária' })).not.toBeOnTheScreen();
+      expect(screen.queryByRole('button', { name: 'Anual / única' })).not.toBeOnTheScreen();
+    });
 
-    expect(onAlterarDescricao).toHaveBeenCalledWith('Combustível');
-    expect(onAlterarValor).toHaveBeenCalledWith('45,50');
+    it('aparece só para "imprevista", com "Anual / única" selecionada por padrão', async () => {
+      await renderizar({ tipo: 'imprevista' });
+
+      expect(screen.getByRole('button', { name: 'Diária' })).not.toBeSelected();
+      expect(screen.getByRole('button', { name: 'Mensal' })).not.toBeSelected();
+      expect(screen.getByRole('button', { name: 'Anual / única' })).toBeSelected();
+    });
+
+    it('permite escolher outra frequência', async () => {
+      await renderizar({ tipo: 'imprevista' });
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Mensal' }));
+
+      expect(screen.getByRole('button', { name: 'Mensal' })).toBeSelected();
+      expect(screen.getByRole('button', { name: 'Anual / única' })).not.toBeSelected();
+    });
   });
 
-  it('"Salvar Dívida" chama onSalvar', async () => {
-    const { onSalvar, onFechar } = await renderizar({ descricao: 'Almoço', valor: '25' });
+  describe('validação', () => {
+    it('sem descrição e sem valor, mostra os dois erros e não salva', async () => {
+      const props = await renderizar();
 
-    await fireEvent.press(screen.getByText('Salvar Dívida'));
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
 
-    expect(onSalvar).toHaveBeenCalledTimes(1);
-    expect(onFechar).not.toHaveBeenCalled();
+      expect(screen.getByText('Informe uma descrição.')).toBeOnTheScreen();
+      expect(screen.getByText('Informe um valor maior que zero.')).toBeOnTheScreen();
+      expect(props.onSalvar).not.toHaveBeenCalled();
+    });
+
+    it('descrição só com espaços conta como vazia', async () => {
+      const props = await renderizar();
+
+      await fireEvent.changeText(campoDescricao(), '   ');
+      await fireEvent.changeText(campoValor(), '30');
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+      expect(screen.getByText('Informe uma descrição.')).toBeOnTheScreen();
+      expect(screen.queryByText('Informe um valor maior que zero.')).not.toBeOnTheScreen();
+      expect(props.onSalvar).not.toHaveBeenCalled();
+    });
+
+    it.each(['abc', '0', '-5'])('valor inválido "%s" mostra erro no campo de valor', async (valor) => {
+      const props = await renderizar();
+
+      await fireEvent.changeText(campoDescricao(), 'Combustível');
+      await fireEvent.changeText(campoValor(), valor);
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+      expect(screen.getByText('Informe um valor maior que zero.')).toBeOnTheScreen();
+      expect(screen.queryByText('Informe uma descrição.')).not.toBeOnTheScreen();
+      expect(props.onSalvar).not.toHaveBeenCalled();
+    });
+
+    it('o erro de cada campo some quando o usuário volta a digitar nele', async () => {
+      await renderizar();
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+      await fireEvent.changeText(campoDescricao(), 'C');
+      expect(screen.queryByText('Informe uma descrição.')).not.toBeOnTheScreen();
+      expect(screen.getByText('Informe um valor maior que zero.')).toBeOnTheScreen();
+
+      await fireEvent.changeText(campoValor(), '1');
+      expect(screen.queryByText('Informe um valor maior que zero.')).not.toBeOnTheScreen();
+    });
   });
 
-  it('"Cancelar" chama onFechar', async () => {
-    const { onSalvar, onFechar } = await renderizar();
+  describe('salvar', () => {
+    it('envia descrição sem espaços extras e o valor convertido, sem frequência para "diaria"', async () => {
+      const props = await renderizar({ tipo: 'diaria' });
 
-    await fireEvent.press(screen.getByText('Cancelar'));
+      await fireEvent.changeText(campoDescricao(), '  Combustível  ');
+      await fireEvent.changeText(campoValor(), '1.250,50');
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
 
-    expect(onFechar).toHaveBeenCalledTimes(1);
-    expect(onSalvar).not.toHaveBeenCalled();
+      expect(props.onSalvar).toHaveBeenCalledTimes(1);
+      expect(props.onSalvar).toHaveBeenCalledWith({ descricao: 'Combustível', valor: 1250.5, frequencia: undefined });
+    });
+
+    it('para "mensal" também não envia frequência', async () => {
+      const props = await renderizar({ tipo: 'mensal' });
+
+      await fireEvent.changeText(campoDescricao('mensal'), 'Seguro');
+      await fireEvent.changeText(campoValor(), '180');
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+      expect(props.onSalvar).toHaveBeenCalledWith({ descricao: 'Seguro', valor: 180, frequencia: undefined });
+    });
+
+    it('para "imprevista", envia a frequência padrão "anual"', async () => {
+      const props = await renderizar({ tipo: 'imprevista' });
+
+      await fireEvent.changeText(campoDescricao('imprevista'), 'Pneu');
+      await fireEvent.changeText(campoValor(), '400');
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+      expect(props.onSalvar).toHaveBeenCalledWith({ descricao: 'Pneu', valor: 400, frequencia: 'anual' });
+    });
+
+    it('para "imprevista", envia a frequência escolhida', async () => {
+      const props = await renderizar({ tipo: 'imprevista' });
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Diária' }));
+      await fireEvent.changeText(campoDescricao('imprevista'), 'Estacionamento');
+      await fireEvent.changeText(campoValor(), '5');
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+      expect(props.onSalvar).toHaveBeenCalledWith({ descricao: 'Estacionamento', valor: 5, frequencia: 'diaria' });
+    });
+
+    it('após salvar com sucesso, limpa o formulário e volta a frequência para "anual"', async () => {
+      await renderizar({ tipo: 'imprevista' });
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Mensal' }));
+      await fireEvent.changeText(campoDescricao('imprevista'), 'Lavagem');
+      await fireEvent.changeText(campoValor(), '50');
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+      expect(campoDescricao('imprevista')).toHaveDisplayValue('');
+      expect(campoValor()).toHaveDisplayValue('');
+      expect(screen.getByRole('button', { name: 'Anual / única' })).toBeSelected();
+    });
+
+    it('enquanto onSalvar está pendente, mostra carregamento e impede envio duplo', async () => {
+      let concluir: () => void = () => {};
+      const onSalvar = jest.fn(() => new Promise<void>((resolve) => { concluir = resolve; }));
+      await renderizar({ onSalvar });
+      await fireEvent.changeText(campoDescricao(), 'Almoço');
+      await fireEvent.changeText(campoValor(), '25');
+      const salvar = screen.getByRole('button', { name: 'Salvar' });
+
+      // Não aguardamos o press: o handler só termina quando onSalvar resolver.
+      const envio = fireEvent.press(salvar);
+      await waitFor(() => expect(salvar).toBeDisabled());
+      expect(indicadoresDeCarregamento()).toHaveLength(1);
+      await fireEvent.press(salvar);
+      expect(onSalvar).toHaveBeenCalledTimes(1);
+
+      await act(async () => concluir());
+      await envio;
+
+      expect(screen.getByRole('button', { name: 'Salvar' })).toBeEnabled();
+      expect(indicadoresDeCarregamento()).toHaveLength(0);
+      expect(campoDescricao()).toHaveDisplayValue('');
+    });
   });
 
-  it('o botão "voltar" do Android (onRequestClose) chama onFechar', async () => {
-    const { onFechar } = await renderizar();
+  describe('fechar', () => {
+    it('"Cancelar" chama onFechar e descarta o que foi digitado', async () => {
+      const props = await renderizar();
+      await fireEvent.changeText(campoDescricao(), 'Rascunho');
+      await fireEvent.changeText(campoValor(), '10');
+      expect(campoDescricao()).toHaveDisplayValue('Rascunho');
 
-    await fireEvent(modaisAbertos()[0], 'requestClose');
+      await fireEvent.press(screen.getByRole('button', { name: 'Cancelar' }));
 
-    expect(onFechar).toHaveBeenCalledTimes(1);
+      expect(props.onFechar).toHaveBeenCalledTimes(1);
+      expect(props.onSalvar).not.toHaveBeenCalled();
+      expect(campoDescricao()).toHaveDisplayValue('');
+      expect(campoValor()).toHaveDisplayValue('');
+    });
+
+    it('"Cancelar" também limpa os erros de validação', async () => {
+      await renderizar();
+      await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+      expect(screen.getByText('Informe uma descrição.')).toBeOnTheScreen();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Cancelar' }));
+
+      expect(screen.queryByText('Informe uma descrição.')).not.toBeOnTheScreen();
+      expect(screen.queryByText('Informe um valor maior que zero.')).not.toBeOnTheScreen();
+    });
+
+    it('tocar no fundo também fecha e limpa', async () => {
+      const props = await renderizar();
+      await fireEvent.changeText(campoDescricao(), 'Rascunho');
+
+      await fireEvent.press(screen.getByLabelText('Fechar'));
+
+      expect(props.onFechar).toHaveBeenCalledTimes(1);
+      expect(campoDescricao()).toHaveDisplayValue('');
+    });
   });
 });

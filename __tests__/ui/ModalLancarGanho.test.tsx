@@ -1,375 +1,383 @@
-// Testes de src/components/ModalLancarGanho.tsx nos três estados:
-//  1) analisando o print (OCR), 2) confirmação do valor lido e 3) formulário manual
-//     (seletor de dias, atalhos +50/+100/+150/+200/Limpar e escolha entre somar ou substituir).
-//
-// A semana vem das funções reais de src/utils para quarta-feira, 21/10/2026 (hoje = índice 2).
-
-import React from 'react';
-import { StyleSheet } from 'react-native';
+import React, { useState } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react-native';
-import type { TestInstance } from 'test-renderer';
-import { ModalLancarGanho, type ModalLancarGanhoProps } from '../../src/components/ModalLancarGanho';
+import { ModalLancarGanho } from '../../src/components/ModalLancarGanho';
 import { cores } from '../../src/theme';
-import type { GanhoDia } from '../../src/types';
+import { GanhoDia } from '../../src/types';
 import { calcularAmortizacaoPorFases } from '../../src/utils/amortizacao';
 import { gerarEstruturaSemana } from '../../src/utils/datas';
 
-const HOJE = new Date(2026, 9, 21, 10, 0);
-const IDX_SEG = 0;
-const IDX_QUA = 2; // hoje
-const SIGLAS = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+type Props = React.ComponentProps<typeof ModalLancarGanho>;
 
-function semanaCom(valores: number[]): GanhoDia[] {
-  const estrutura = gerarEstruturaSemana(HOJE).map((dia, i) =>
-    valores[i] ? { ...dia, valor: valores[i], temRegistro: true } : dia
-  );
-  return calcularAmortizacaoPorFases(estrutura, 100);
+// Semana fixa de 19 a 25/10/2026, "hoje" = quarta (índice 2), que já tem R$ 30 lançados.
+const HOJE = new Date(2026, 9, 21);
+const DIAS: GanhoDia[] = calcularAmortizacaoPorFases(
+  gerarEstruturaSemana(HOJE).map((d, i) => (i === 2 ? { ...d, valor: 30, temRegistro: true } : d)),
+  100,
+);
+const IDX_QUARTA = 2; // hoje, com ganho existente
+const IDX_QUINTA = 3; // sem ganho
+
+const indicadoresDeCarregamento = () =>
+  screen.container.queryAll((el) => el.type === 'ActivityIndicator');
+const nomesDosBotoes = () => screen.getAllByRole('button').map((b) => b.props.accessibilityLabel);
+
+function propsBase(over: Partial<Props> = {}): Props {
+  return {
+    visivel: true,
+    onFechar: jest.fn(),
+    dias: DIAS,
+    diaIdx: IDX_QUINTA,
+    onTrocarDia: jest.fn(),
+    valorDigitado: '',
+    onChangeValor: jest.fn(),
+    salvando: false,
+    onSalvar: jest.fn(),
+    onEscanearOCR: jest.fn(),
+    analisandoOCR: false,
+    ocrPronto: false,
+    valorOCR: 0,
+    onDigitarManual: jest.fn(),
+    ...over,
+  };
 }
 
-const SEMANA_VAZIA = semanaCom([0, 0, 0, 0, 0, 0, 0]);
-const SEMANA_COM_80_HOJE = semanaCom([0, 0, 80, 0, 0, 0, 0]);
+async function renderizar(over: Partial<Props> = {}) {
+  const props = propsBase(over);
+  await render(<ModalLancarGanho {...props} />);
+  return props;
+}
 
-async function renderizar(props: Partial<ModalLancarGanhoProps> = {}) {
-  const callbacks = {
-    onSelecionarDia: jest.fn(),
-    onAlterarValor: jest.fn(),
-    onSalvar: jest.fn(),
-    onDigitarManualmente: jest.fn(),
-    onFechar: jest.fn(),
-  };
-  await render(
+// Versão controlada (como no App): o valor digitado e o dia vivem em estado do pai.
+function ModalControlado({ inicial = '', diaInicial = IDX_QUINTA, onSalvar = jest.fn() }: { inicial?: string; diaInicial?: number; onSalvar?: Props['onSalvar'] }) {
+  const [valor, setValor] = useState(inicial);
+  const [diaIdx, setDiaIdx] = useState(diaInicial);
+  return (
     <ModalLancarGanho
-      visivel
-      diasSemana={SEMANA_VAZIA}
-      diaLancamentoIdx={IDX_QUA}
-      valorDigitado=""
-      salvando={false}
-      analisandoOCR={false}
-      ocrConfirmacaoPronta={false}
-      valorExtraidoOCR={0}
-      {...callbacks}
-      {...props}
+      {...propsBase()}
+      valorDigitado={valor}
+      onChangeValor={setValor}
+      diaIdx={diaIdx}
+      onTrocarDia={setDiaIdx}
+      onSalvar={onSalvar}
     />
   );
-  return callbacks;
 }
 
-const modaisAbertos = () => screen.container.queryAll((el) => el.type === 'Modal');
-const spinners = () => screen.container.queryAll((el) => el.type === 'ActivityIndicator');
-const campoValor = () => screen.getByPlaceholderText('0.00');
-const estiloDe = (el: TestInstance) => StyleSheet.flatten(el.props.style) ?? {};
-
-const PROPS_CONFIRMACAO = { ocrConfirmacaoPronta: true, valorExtraidoOCR: 1234.5, valorDigitado: '1234.50' };
-
 describe('ModalLancarGanho', () => {
-  it('não mostra nada quando está fechado', async () => {
+  it('invisível, não renderiza nada', async () => {
     await renderizar({ visivel: false });
 
-    expect(modaisAbertos()).toHaveLength(0);
-    expect(screen.queryByText('Lançar Ganho')).not.toBeOnTheScreen();
+    expect(screen.queryByText('Lançar ganho')).not.toBeOnTheScreen();
   });
 
-  it('abre como bottom sheet transparente com slide', async () => {
-    await renderizar();
+  describe('lançamento manual', () => {
+    it('mostra título, dia no subtítulo, pílulas Seg–Dom, "Já registrado" e o campo de valor', async () => {
+      await renderizar();
 
-    const [modal] = modaisAbertos();
-    expect(modal).toHaveProp('transparent', true);
-    expect(modal).toHaveProp('animationType', 'slide');
-  });
-
-  it('o botão "voltar" do Android (onRequestClose) chama onFechar', async () => {
-    const { onFechar } = await renderizar();
-
-    await fireEvent(modaisAbertos()[0], 'requestClose');
-
-    expect(onFechar).toHaveBeenCalledTimes(1);
-  });
-
-  // ─── 1) ANALISANDO ──────────────────────────────────────────────────────────
-  describe('estado "analisando o print"', () => {
-    it('mostra o indicador de carregamento e as mensagens da análise', async () => {
-      await renderizar({ analisandoOCR: true });
-
-      expect(spinners()).toHaveLength(1);
-      expect(screen.getByText('Analisando captura de tela...')).toBeOnTheScreen();
-      expect(screen.getByText('Extraindo valores via OCR On-Device')).toBeOnTheScreen();
+      expect(screen.getByText('Lançar ganho')).toBeOnTheScreen();
+      expect(screen.getByText('Quinta, 22 out')).toBeOnTheScreen();
+      expect(screen.getAllByRole('button', { name: /^(Seg|Ter|Qua|Qui|Sex|Sáb|Dom)$/ })).toHaveLength(7);
+      expect(screen.getByRole('button', { name: 'Qui' })).toBeSelected();
+      expect(screen.getByText('Já registrado: R$ 0,00')).toBeOnTheScreen();
+      expect(screen.getByLabelText('Valor do ganho')).toHaveProp('keyboardType', 'numeric');
+      expect(screen.getByLabelText('Valor do ganho')).toBe(screen.getByPlaceholderText('0,00'));
+      expect(screen.getByText('R$')).toBeOnTheScreen();
     });
 
-    it('esconde o formulário e a confirmação, mesmo com a confirmação já pronta', async () => {
-      await renderizar({ analisandoOCR: true, ...PROPS_CONFIRMACAO });
+    it('segue a ordem do mockup: salvar, escanear print e cancelar no fim', async () => {
+      await renderizar();
 
-      expect(screen.queryByText('Lançar Ganho')).not.toBeOnTheScreen();
-      expect(screen.queryByText('✓ OCR Concluído')).not.toBeOnTheScreen();
-      expect(screen.queryByText('Cancelar')).not.toBeOnTheScreen();
-    });
-  });
-
-  // ─── 2) CONFIRMAÇÃO DO OCR ──────────────────────────────────────────────────
-  describe('estado "confirmação do OCR"', () => {
-    it('mostra o valor lido em pt-BR e o dia do lançamento', async () => {
-      await renderizar({ ...PROPS_CONFIRMACAO, diaLancamentoIdx: IDX_QUA });
-
-      expect(screen.getByText('✓ OCR Concluído')).toBeOnTheScreen();
-      expect(
-        screen.getByText('Encontramos o valor de R$ 1.234,50 para Quarta-feira, 21 de out. Como deseja salvar?')
-      ).toBeOnTheScreen();
-      expect(screen.getByText('R$ 1.234,50')).toHaveStyle({ color: '#00D26A', fontWeight: '800' });
-      expect(screen.queryByText('Lançar Ganho')).not.toBeOnTheScreen();
-      expect(screen.queryByText('Seg')).not.toBeOnTheScreen(); // sem seletor de dias
-      expect(spinners()).toHaveLength(0);
+      expect(nomesDosBotoes().slice(-3)).toEqual(['Salvar ganho', 'Escanear print (OCR)', 'Cancelar']);
     });
 
-    it('dia sem ganho: só "Confirmar e Salvar", que substitui o valor do dia', async () => {
-      const { onSalvar } = await renderizar({ ...PROPS_CONFIRMACAO, diasSemana: SEMANA_VAZIA });
+    it('para o dia de hoje com ganho existente, marca "hoje" e informa o valor já registrado', async () => {
+      await renderizar({ diaIdx: IDX_QUARTA });
 
-      expect(screen.queryByText(/^\+ Somar aos/)).not.toBeOnTheScreen();
-      await fireEvent.press(screen.getByText('Confirmar e Salvar'));
-
-      expect(onSalvar).toHaveBeenCalledTimes(1);
-      expect(onSalvar).toHaveBeenCalledWith('substituir');
+      expect(screen.getByText('Quarta, 21 out · hoje')).toBeOnTheScreen();
+      expect(screen.getByText('Já registrado: R$ 30,00')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 30,00')).toHaveStyle({ color: cores.primaria });
     });
 
-    it('dia com ganho: oferece somar ao valor existente (com o total) ou substituir', async () => {
-      const { onSalvar } = await renderizar({ ...PROPS_CONFIRMACAO, diasSemana: SEMANA_COM_80_HOJE });
+    it('digitar no campo repassa o texto para onChangeValor', async () => {
+      const props = await renderizar();
 
-      expect(screen.queryByText('Confirmar e Salvar')).not.toBeOnTheScreen();
-      await fireEvent.press(screen.getByText('+ Somar aos R$ 80.00 (Total: R$ 1314.50)'));
-      await fireEvent.press(screen.getByText('Substituir por R$ 1234.50'));
+      await fireEvent.changeText(screen.getByPlaceholderText('0,00'), '87,50');
 
-      expect(onSalvar.mock.calls).toEqual([['somar'], ['substituir']]);
+      expect(props.onChangeValor).toHaveBeenCalledWith('87,50');
     });
 
-    it('"Digitar Manualmente" volta para o formulário via onDigitarManualmente', async () => {
-      const { onDigitarManualmente, onSalvar } = await renderizar(PROPS_CONFIRMACAO);
+    it('selecionar outra pílula troca o dia e limpa o valor digitado', async () => {
+      const props = await renderizar({ valorDigitado: '50' });
 
-      await fireEvent.press(screen.getByText('Digitar Manualmente'));
+      await fireEvent.press(screen.getByRole('button', { name: 'Sex' }));
 
-      expect(onDigitarManualmente).toHaveBeenCalledTimes(1);
-      expect(onSalvar).not.toHaveBeenCalled();
+      expect(props.onTrocarDia).toHaveBeenCalledWith(4);
+      expect(props.onChangeValor).toHaveBeenCalledWith('');
     });
 
-    it('durante o salvamento troca "Somar" pelo indicador e bloqueia os dois botões', async () => {
-      const { onSalvar, onDigitarManualmente } = await renderizar({
-        ...PROPS_CONFIRMACAO,
-        diasSemana: SEMANA_COM_80_HOJE,
-        salvando: true,
+    describe('atalhos de valor', () => {
+      it.each([
+        ['+50', '50'],
+        ['+100', '100'],
+        ['+150', '150'],
+        ['+200', '200'],
+        ['Limpar', ''],
+      ])('"%s" preenche o campo com "%s"', async (atalho, esperado) => {
+        const props = await renderizar({ valorDigitado: '999' });
+
+        await fireEvent.press(screen.getByText(atalho));
+
+        expect(props.onChangeValor).toHaveBeenCalledWith(esperado);
       });
 
-      expect(screen.queryByText(/^\+ Somar aos/)).not.toBeOnTheScreen();
-      const [spinner] = spinners();
-      expect(spinner).toBeDisabled();
-      expect(screen.getByText('Substituir por R$ 1234.50')).toBeDisabled();
+      it('com estado controlado, o campo mostra o valor do atalho e "Limpar" esvazia', async () => {
+        await render(<ModalControlado />);
+        const campo = screen.getByPlaceholderText('0,00');
 
-      await fireEvent.press(spinner);
-      await fireEvent.press(screen.getByText('Substituir por R$ 1234.50'));
-      await fireEvent.press(screen.getByText('Digitar Manualmente'));
+        await fireEvent.press(screen.getByText('+150'));
+        expect(campo).toHaveDisplayValue('150');
 
-      expect(onSalvar).not.toHaveBeenCalled();
-      expect(onDigitarManualmente).toHaveBeenCalledTimes(1);
+        // O atalho substitui o valor (não soma ao que já estava digitado).
+        await fireEvent.press(screen.getByText('+50'));
+        expect(campo).toHaveDisplayValue('50');
+
+        await fireEvent.press(screen.getByText('Limpar'));
+        expect(campo).toHaveDisplayValue('');
+      });
+
+      it('com estado controlado, trocar de dia apaga o valor digitado', async () => {
+        await render(<ModalControlado inicial="120" />);
+
+        await fireEvent.press(screen.getByRole('button', { name: 'Seg' }));
+
+        expect(screen.getByPlaceholderText('0,00')).toHaveDisplayValue('');
+        expect(screen.getByRole('button', { name: 'Seg' })).toBeSelected();
+        expect(screen.getByText('Segunda, 19 out')).toBeOnTheScreen();
+      });
+
+      it('os atalhos são botões em pílulas neutras ("Limpar" com texto mais suave)', async () => {
+        await renderizar();
+
+        for (const atalho of ['+50', '+100', '+150', '+200', 'Limpar']) {
+          expect(screen.getByRole('button', { name: atalho })).toHaveStyle({ backgroundColor: cores.superficieAlta });
+        }
+        expect(screen.getByText('+50')).toHaveStyle({ color: cores.texto });
+        expect(screen.getByText('Limpar')).toHaveStyle({ color: cores.textoSuave });
+      });
     });
 
-    it('durante o salvamento bloqueia "Confirmar e Salvar" no dia sem ganho', async () => {
-      const { onSalvar } = await renderizar({ ...PROPS_CONFIRMACAO, salvando: true });
+    describe('dia sem ganho', () => {
+      it('"Salvar ganho" fica desabilitado sem valor', async () => {
+        const props = await renderizar({ valorDigitado: '' });
 
-      expect(screen.getByText('Confirmar e Salvar')).toBeDisabled();
-      await fireEvent.press(screen.getByText('Confirmar e Salvar'));
+        const salvar = screen.getByRole('button', { name: 'Salvar ganho' });
+        expect(salvar).toBeDisabled();
+        await fireEvent.press(salvar);
+        expect(props.onSalvar).not.toHaveBeenCalled();
+      });
 
-      expect(onSalvar).not.toHaveBeenCalled();
-    });
+      it.each(['abc', '0', '0,00', '-10'])('valor inválido "%s" mantém "Salvar ganho" desabilitado', async (valor) => {
+        const props = await renderizar({ valorDigitado: valor });
 
-    it('usa o dia do lançamento informado (não necessariamente hoje)', async () => {
-      await renderizar({ ...PROPS_CONFIRMACAO, diaLancamentoIdx: IDX_SEG });
+        const salvar = screen.getByRole('button', { name: 'Salvar ganho' });
+        expect(salvar).toBeDisabled();
+        await fireEvent.press(salvar);
+        expect(props.onSalvar).not.toHaveBeenCalled();
+      });
 
-      expect(
-        screen.getByText('Encontramos o valor de R$ 1.234,50 para Segunda-feira, 19 de out. Como deseja salvar?')
-      ).toBeOnTheScreen();
-    });
-  });
+      it('com valor válido, o botão mostra o valor ("Salvar R$ 150,00") e salva no modo "somar"', async () => {
+        const props = await renderizar({ valorDigitado: '150' });
 
-  // ─── 3) FORMULÁRIO MANUAL ───────────────────────────────────────────────────
-  describe('formulário manual', () => {
-    it('mostra título, instrução, os 7 dias, o dia escolhido (hoje), o campo e as ações', async () => {
-      await renderizar({ diaLancamentoIdx: IDX_QUA });
+        expect(screen.queryByRole('button', { name: 'Salvar ganho' })).not.toBeOnTheScreen();
+        await fireEvent.press(screen.getByRole('button', { name: 'Salvar R$ 150,00' }));
 
-      expect(screen.getByText('Lançar Ganho')).toBeOnTheScreen();
-      expect(screen.getByText('Selecione o dia e informe o valor:')).toBeOnTheScreen();
-      for (const sigla of SIGLAS) {
-        expect(screen.getByText(sigla)).toBeOnTheScreen();
-      }
-      expect(screen.getByText('📅 Quarta-feira, 21 de out (Hoje)')).toBeOnTheScreen();
-      expect(screen.getByText('Quanto você fez? (R$)')).toBeOnTheScreen();
-      expect(campoValor()).toHaveDisplayValue('');
-      expect(screen.getByText('Salvar Ganho')).toBeOnTheScreen();
-      expect(screen.getByText('Cancelar')).toBeOnTheScreen();
-      expect(screen.queryByText(/Já registrado/)).not.toBeOnTheScreen();
-    });
+        expect(props.onSalvar).toHaveBeenCalledTimes(1);
+        expect(props.onSalvar).toHaveBeenCalledWith('somar');
+      });
 
-    it('não marca "(Hoje)" quando o dia escolhido não é hoje', async () => {
-      await renderizar({ diaLancamentoIdx: IDX_SEG });
+      it('o rótulo dinâmico acompanha digitação, atalhos e "Limpar" (estado controlado)', async () => {
+        await render(<ModalControlado />);
 
-      expect(screen.getByText('📅 Segunda-feira, 19 de out')).toBeOnTheScreen();
-      expect(screen.queryByText(/\(Hoje\)/)).not.toBeOnTheScreen();
-    });
+        await fireEvent.changeText(screen.getByLabelText('Valor do ganho'), '120');
+        expect(screen.getByRole('button', { name: 'Salvar R$ 120,00' })).toBeEnabled();
 
-    it('com índice fora da semana, usa a segunda-feira', async () => {
-      await renderizar({ diaLancamentoIdx: 10 });
+        await fireEvent.changeText(screen.getByLabelText('Valor do ganho'), '87,5');
+        expect(screen.getByRole('button', { name: 'Salvar R$ 87,50' })).toBeEnabled();
 
-      expect(screen.getByText('📅 Segunda-feira, 19 de out')).toBeOnTheScreen();
-    });
+        await fireEvent.press(screen.getByRole('button', { name: '+200' }));
+        expect(screen.getByRole('button', { name: 'Salvar R$ 200,00' })).toBeEnabled();
 
-    it.each(SIGLAS.map((sigla, indice) => [sigla, indice] as const))(
-      'a pílula "%s" seleciona o dia %i',
-      async (sigla, indice) => {
-        const { onSelecionarDia } = await renderizar();
+        await fireEvent.press(screen.getByRole('button', { name: 'Limpar' }));
+        expect(screen.getByRole('button', { name: 'Salvar ganho' })).toBeDisabled();
+      });
 
-        await fireEvent.press(screen.getByText(sigla));
+      it('não oferece as opções somar/substituir', async () => {
+        await renderizar({ valorDigitado: '150' });
 
-        expect(onSelecionarDia).toHaveBeenCalledTimes(1);
-        expect(onSelecionarDia).toHaveBeenCalledWith(indice);
-      }
-    );
-
-    it('destaca a pílula do dia escolhido e marca hoje com um ponto', async () => {
-      await renderizar({ diaLancamentoIdx: IDX_SEG });
-
-      expect(screen.getByText('Seg').parent).toHaveStyle({ backgroundColor: cores.primaria });
-      expect(screen.getByText('Seg')).toHaveStyle({ color: cores.primariaTexto });
-      expect(screen.getByText('Qua').parent).toHaveStyle({ backgroundColor: cores.superficieAlta });
-
-      const pontos = screen.container.queryAll(
-        (el) => el.type === 'View' && estiloDe(el).width === 4 && estiloDe(el).backgroundColor === cores.info
-      );
-      expect(pontos).toHaveLength(1);
-      expect(pontos[0].parent).toBe(screen.getByText('Qua').parent);
-    });
-
-    it('campo numérico com foco automático; o texto digitado vai para onAlterarValor', async () => {
-      const { onAlterarValor } = await renderizar({ valorDigitado: '75' });
-
-      expect(campoValor()).toHaveDisplayValue('75');
-      expect(campoValor()).toHaveProp('keyboardType', 'numeric');
-      expect(campoValor()).toHaveProp('autoFocus', true);
-
-      await fireEvent.changeText(campoValor(), '120,50');
-
-      expect(onAlterarValor).toHaveBeenCalledWith('120,50');
-    });
-
-    it.each([
-      ['+50', '50'],
-      ['+100', '100'],
-      ['+150', '150'],
-      ['+200', '200'],
-      ['Limpar', ''],
-    ])('o atalho "%s" define o valor como %j', async (atalho, valor) => {
-      const { onAlterarValor } = await renderizar({ valorDigitado: '30' });
-
-      await fireEvent.press(screen.getByText(atalho));
-
-      expect(onAlterarValor).toHaveBeenCalledTimes(1);
-      expect(onAlterarValor).toHaveBeenCalledWith(valor);
-    });
-
-    it('os atalhos substituem o valor digitado (não acumulam)', async () => {
-      const { onAlterarValor } = await renderizar({ valorDigitado: '50' });
-
-      await fireEvent.press(screen.getByText('+50'));
-      await fireEvent.press(screen.getByText('+50'));
-
-      expect(onAlterarValor.mock.calls).toEqual([['50'], ['50']]);
-    });
-
-    it('dia sem ganho: "Salvar Ganho" soma (mesmo com valor digitado)', async () => {
-      const { onSalvar } = await renderizar({ valorDigitado: '150' });
-
-      expect(screen.queryByText(/^Substituir por/)).not.toBeOnTheScreen();
-      await fireEvent.press(screen.getByText('Salvar Ganho'));
-
-      expect(onSalvar).toHaveBeenCalledTimes(1);
-      expect(onSalvar).toHaveBeenCalledWith('somar');
+        expect(screen.queryByRole('button', { name: /^Somar/ })).not.toBeOnTheScreen();
+        expect(screen.queryByRole('button', { name: /^Substituir/ })).not.toBeOnTheScreen();
+      });
     });
 
     describe('dia que já tem ganho', () => {
-      it('avisa o valor já registrado e pergunta quanto adicionar', async () => {
-        await renderizar({ diasSemana: SEMANA_COM_80_HOJE });
+      it('sem valor novo, mostra "Salvar ganho" desabilitado', async () => {
+        await renderizar({ diaIdx: IDX_QUARTA, valorDigitado: '' });
 
-        expect(screen.getByText('💡 Já registrado neste dia: R$ 80.00')).toBeOnTheScreen();
-        expect(screen.getByText('Quanto quer adicionar a mais? (R$)')).toBeOnTheScreen();
-        expect(screen.queryByText('Quanto você fez? (R$)')).not.toBeOnTheScreen();
+        expect(screen.getByRole('button', { name: 'Salvar ganho' })).toBeDisabled();
       });
 
-      it('sem valor digitado, "Salvar Ganho" substitui', async () => {
-        const { onSalvar } = await renderizar({ diasSemana: SEMANA_COM_80_HOJE, valorDigitado: '' });
+      it('com valor novo, oferece somar (com o total) ou substituir', async () => {
+        await renderizar({ diaIdx: IDX_QUARTA, valorDigitado: '1.250,50' });
 
-        await fireEvent.press(screen.getByText('Salvar Ganho'));
-
-        expect(onSalvar).toHaveBeenCalledWith('substituir');
+        expect(screen.getByRole('button', { name: 'Somar R$ 1.250,50 → total R$ 1.280,50' })).toBeEnabled();
+        expect(screen.getByRole('button', { name: 'Substituir por R$ 1.250,50' })).toBeEnabled();
+        expect(screen.queryByRole('button', { name: 'Salvar ganho' })).not.toBeOnTheScreen();
       });
 
-      it('com valor digitado, mostra o novo total e oferece somar ou substituir', async () => {
-        const { onSalvar } = await renderizar({ diasSemana: SEMANA_COM_80_HOJE, valorDigitado: '50' });
+      it('"Somar" salva no modo "somar"', async () => {
+        const props = await renderizar({ diaIdx: IDX_QUARTA, valorDigitado: '50' });
 
-        expect(screen.queryByText('Salvar Ganho')).not.toBeOnTheScreen();
-        await fireEvent.press(screen.getByText('+ Somar R$ 50.00 (Novo Total: R$ 130.00)'));
-        await fireEvent.press(screen.getByText('Substituir por R$ 50.00'));
+        await fireEvent.press(screen.getByRole('button', { name: 'Somar R$ 50,00 → total R$ 80,00' }));
 
-        expect(onSalvar.mock.calls).toEqual([['somar'], ['substituir']]);
+        expect(props.onSalvar).toHaveBeenCalledWith('somar');
       });
 
-      it('entende valores no formato brasileiro na prévia', async () => {
-        await renderizar({ diasSemana: SEMANA_COM_80_HOJE, valorDigitado: '1.250,50' });
+      it('"Substituir" salva no modo "substituir"', async () => {
+        const props = await renderizar({ diaIdx: IDX_QUARTA, valorDigitado: '50' });
 
-        expect(screen.getByText('+ Somar R$ 1250.50 (Novo Total: R$ 1330.50)')).toBeOnTheScreen();
-        expect(screen.getByText('Substituir por R$ 1250.50')).toBeOnTheScreen();
+        await fireEvent.press(screen.getByRole('button', { name: 'Substituir por R$ 50,00' }));
+
+        expect(props.onSalvar).toHaveBeenCalledWith('substituir');
       });
 
-      it('texto inválido conta como zero e volta ao botão único "Salvar Ganho"', async () => {
-        await renderizar({ diasSemana: SEMANA_COM_80_HOJE, valorDigitado: 'abc' });
+      it('com estado controlado, o texto do botão acompanha o valor digitado', async () => {
+        await render(<ModalControlado diaInicial={IDX_QUARTA} />);
 
-        expect(screen.getByText('Salvar Ganho')).toBeOnTheScreen();
-        expect(screen.queryByText(/^\+ Somar/)).not.toBeOnTheScreen();
-      });
+        await fireEvent.changeText(screen.getByPlaceholderText('0,00'), '70');
+        expect(screen.getByRole('button', { name: 'Somar R$ 70,00 → total R$ 100,00' })).toBeOnTheScreen();
 
-      it('durante o salvamento troca "Somar" pelo indicador e bloqueia somar e substituir', async () => {
-        const { onSalvar } = await renderizar({
-          diasSemana: SEMANA_COM_80_HOJE,
-          valorDigitado: '50',
-          salvando: true,
-        });
-
-        expect(screen.queryByText(/^\+ Somar/)).not.toBeOnTheScreen();
-        const [spinner] = spinners();
-        expect(spinner).toBeDisabled();
-        expect(screen.getByText('Substituir por R$ 50.00')).toBeDisabled();
-
-        await fireEvent.press(spinner);
-        await fireEvent.press(screen.getByText('Substituir por R$ 50.00'));
-
-        expect(onSalvar).not.toHaveBeenCalled();
+        await fireEvent.press(screen.getByText('+200'));
+        expect(screen.getByRole('button', { name: 'Somar R$ 200,00 → total R$ 230,00' })).toBeOnTheScreen();
+        expect(screen.getByRole('button', { name: 'Substituir por R$ 200,00' })).toBeOnTheScreen();
       });
     });
 
-    it('durante o salvamento troca "Salvar Ganho" pelo indicador e bloqueia o botão', async () => {
-      const { onSalvar, onFechar } = await renderizar({ valorDigitado: '150', salvando: true });
+    describe('salvando', () => {
+      it('no botão único, mostra carregamento, mantém o nome acessível e bloqueia novo envio', async () => {
+        const props = await renderizar({ valorDigitado: '150', salvando: true });
 
-      expect(screen.queryByText('Salvar Ganho')).not.toBeOnTheScreen();
-      const [spinner] = spinners();
-      expect(spinner).toBeDisabled();
-      await fireEvent.press(spinner);
-      expect(onSalvar).not.toHaveBeenCalled();
+        const salvar = screen.getByRole('button', { name: 'Salvar R$ 150,00' });
+        expect(screen.queryByText('Salvar R$ 150,00')).not.toBeOnTheScreen();
+        expect(indicadoresDeCarregamento()).toHaveLength(1);
+        expect(salvar).toBeBusy();
+        expect(salvar).toBeDisabled();
+        await fireEvent.press(salvar);
+        expect(props.onSalvar).not.toHaveBeenCalled();
+        expect(screen.getByRole('button', { name: 'Cancelar' })).toBeEnabled();
+      });
 
-      // "Cancelar" continua disponível
-      await fireEvent.press(screen.getByText('Cancelar'));
-      expect(onFechar).toHaveBeenCalledTimes(1);
+      it('enquanto salva, "Escanear print (OCR)" também fica desabilitado', async () => {
+        const props = await renderizar({ valorDigitado: '150', salvando: true });
+
+        const ocr = screen.getByRole('button', { name: 'Escanear print (OCR)' });
+        expect(ocr).toBeDisabled();
+        await fireEvent.press(ocr);
+        expect(props.onEscanearOCR).not.toHaveBeenCalled();
+      });
+
+      it('com somar/substituir, "Somar" carrega e "Substituir" fica desabilitado', async () => {
+        const props = await renderizar({ diaIdx: IDX_QUARTA, valorDigitado: '50', salvando: true });
+
+        expect(indicadoresDeCarregamento()).toHaveLength(1);
+        const substituir = screen.getByRole('button', { name: 'Substituir por R$ 50,00' });
+        expect(substituir).toBeDisabled();
+        await fireEvent.press(substituir);
+        expect(props.onSalvar).not.toHaveBeenCalled();
+      });
     });
 
-    it('"Cancelar" chama onFechar sem salvar', async () => {
-      const { onFechar, onSalvar } = await renderizar({ valorDigitado: '150' });
+    it('"Cancelar" e o toque no fundo chamam onFechar', async () => {
+      const props = await renderizar();
 
-      await fireEvent.press(screen.getByText('Cancelar'));
+      await fireEvent.press(screen.getByRole('button', { name: 'Cancelar' }));
+      await fireEvent.press(screen.getByLabelText('Fechar'));
 
-      expect(onFechar).toHaveBeenCalledTimes(1);
-      expect(onSalvar).not.toHaveBeenCalled();
+      expect(props.onFechar).toHaveBeenCalledTimes(2);
+      expect(props.onSalvar).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('OCR', () => {
+    it('"Escanear print (OCR)" fica dentro do formulário, como ação secundária, e chama onEscanearOCR', async () => {
+      const props = await renderizar({ valorDigitado: '50' });
+
+      const ocr = screen.getByRole('button', { name: 'Escanear print (OCR)' });
+      expect(ocr).toHaveStyle({ borderColor: cores.neutro });
+      await fireEvent.press(ocr);
+
+      expect(props.onEscanearOCR).toHaveBeenCalledTimes(1);
+      expect(props.onSalvar).not.toHaveBeenCalled();
+      expect(props.onFechar).not.toHaveBeenCalled();
+    });
+
+    it('enquanto analisa, mostra apenas o estado de leitura', async () => {
+      await renderizar({ analisandoOCR: true });
+
+      expect(screen.getByText('Lendo o print…')).toBeOnTheScreen();
+      expect(screen.getByText('OCR no aparelho, nada é enviado.')).toBeOnTheScreen();
+      expect(indicadoresDeCarregamento()).toHaveLength(1);
+      expect(screen.queryByText('Lançar ganho')).not.toBeOnTheScreen();
+      expect(screen.queryByText('Valor encontrado')).not.toBeOnTheScreen();
+    });
+
+    it('a análise em andamento tem prioridade sobre um resultado pronto', async () => {
+      await renderizar({ analisandoOCR: true, ocrPronto: true, valorOCR: 250 });
+
+      expect(screen.getByText('Lendo o print…')).toBeOnTheScreen();
+      expect(screen.queryByText('Valor encontrado')).not.toBeOnTheScreen();
+    });
+
+    it('com valor encontrado num dia sem ganho, oferece "Confirmar e salvar" (modo substituir)', async () => {
+      const props = await renderizar({ ocrPronto: true, valorOCR: 250, diaIdx: IDX_QUINTA });
+
+      expect(screen.getByText('Valor encontrado')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 250,00')).toHaveStyle({ color: cores.primaria });
+      expect(screen.getByText('para Quinta, 22 out')).toBeOnTheScreen();
+      expect(screen.queryByRole('button', { name: 'Escanear print (OCR)' })).not.toBeOnTheScreen();
+      expect(screen.queryByText('Lançar ganho')).not.toBeOnTheScreen();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Confirmar e salvar' }));
+
+      expect(props.onSalvar).toHaveBeenCalledWith('substituir');
+    });
+
+    it('com valor encontrado num dia que já tem ganho, oferece somar ou substituir', async () => {
+      const props = await renderizar({ ocrPronto: true, valorOCR: 250, diaIdx: IDX_QUARTA });
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Somar aos R$ 30,00 → R$ 280,00' }));
+      expect(props.onSalvar).toHaveBeenLastCalledWith('somar');
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Substituir por R$ 250,00' }));
+      expect(props.onSalvar).toHaveBeenLastCalledWith('substituir');
+    });
+
+    it('"Digitar manualmente" chama onDigitarManual', async () => {
+      const props = await renderizar({ ocrPronto: true, valorOCR: 250 });
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Digitar manualmente' }));
+
+      expect(props.onDigitarManual).toHaveBeenCalledTimes(1);
+    });
+
+    it('salvando o resultado do OCR, o botão principal carrega e não aceita novo toque', async () => {
+      const props = await renderizar({ ocrPronto: true, valorOCR: 250, salvando: true });
+
+      const confirmar = screen.getByRole('button', { name: 'Confirmar e salvar' });
+      expect(screen.queryByText('Confirmar e salvar')).not.toBeOnTheScreen();
+      expect(indicadoresDeCarregamento()).toHaveLength(1);
+      expect(confirmar).toBeBusy();
+      await fireEvent.press(confirmar);
+      expect(props.onSalvar).not.toHaveBeenCalled();
     });
   });
 });
