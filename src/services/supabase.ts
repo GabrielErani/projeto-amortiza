@@ -81,12 +81,13 @@ function falha<T>(err: unknown): ResultadoServico<T> {
 }
 
 function comTimeout<T>(promessa: PromiseLike<T>, ms: number): Promise<T> {
-  return Promise.race([
-    Promise.resolve(promessa),
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error('Tempo limite ao conectar com a nuvem (timeout).')), ms)
-    ),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const limite = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Tempo limite ao conectar com a nuvem (timeout).')), ms);
+  });
+  return Promise.race([Promise.resolve(promessa), limite]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 // ─── CONEXÃO ──────────────────────────────────────────────────────────────────

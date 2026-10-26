@@ -38,6 +38,9 @@ let timerDebounce: ReturnType<typeof setTimeout> | null = null;
 let syncEmAndamento: Promise<ResultadoServico<{ enviados: number; recebidos: number }>> | null = null;
 let syncPendenteAposAtual = false;
 let estadoRestaurado = false;
+// Incrementa a cada troca de usuário: uma sincronização iniciada em uma geração
+// anterior é descartada antes de gravar qualquer coisa (evita vazar dados entre contas).
+let geracaoUsuario = 0;
 
 // ─── ESTADO OBSERVÁVEL ────────────────────────────────────────────────────────
 
@@ -59,7 +62,11 @@ export function obterEstadoSync(): EstadoSync {
 /** Emite imediatamente o estado atual e retorna função para cancelar a observação. */
 export function observarEstadoSync(cb: (e: EstadoSync) => void): () => void {
   observadores.push(cb);
-  cb(estadoAtual);
+  try {
+    cb(estadoAtual);
+  } catch {
+    // Observador com erro não impede o registro nem derruba quem chamou
+  }
   return () => {
     observadores = observadores.filter((o) => o !== cb);
   };
@@ -69,12 +76,14 @@ export function observarEstadoSync(cb: (e: EstadoSync) => void): () => void {
 export function definirUsuarioSync(userId: string | null) {
   const mudou = usuarioAtualId !== userId;
   usuarioAtualId = userId;
+  if (mudou) geracaoUsuario++;
 
   if (!userId) {
     if (timerDebounce) {
       clearTimeout(timerDebounce);
       timerDebounce = null;
     }
+    syncPendenteAposAtual = false;
     emitir({ status: 'sem_conta', mensagem: 'Entre para sincronizar na nuvem.' });
     return;
   }
@@ -193,12 +202,23 @@ export async function sincronizarTudo(
   return syncEmAndamento;
 }
 
+const MSG_CANCELADA = 'Sincronização cancelada: o usuário mudou.';
+
 async function executarSync(
   userId: string
 ): Promise<ResultadoServico<{ enviados: number; recebidos: number }>> {
+  const geracao = geracaoUsuario;
+  // Verdadeiro se o usuário saiu ou trocou (definirUsuarioSync) desde o início desta rodada.
+  const cancelada = () => geracao !== geracaoUsuario;
+  const cancelar = (): ResultadoServico<{ enviados: number; recebidos: number }> => ({
+    success: false,
+    error: MSG_CANCELADA,
+  });
+
   emitir({ ...estadoAtual, status: 'sincronizando', mensagem: 'Sincronizando...' });
 
   const conexao = await verificarConexao();
+  if (cancelada()) return cancelar();
   if (!conexao.online) {
     return registrarFalha(conexao.motivo || 'Nuvem indisponível.');
   }
@@ -209,12 +229,14 @@ async function executarSync(
   // 1) Ganhos
   const ganhosLocais = await carregarGanhosLocais();
   const ganhosRemotos = await buscarGanhosRemotos(userId);
+  if (cancelada()) return cancelar();
   if (!ganhosRemotos.success) return registrarFalha(ganhosRemotos.error);
 
   const mg = mesclarGanhos(ganhosLocais, ganhosRemotos.data);
   if (mg.recebidos > 0) await substituirGanhosLocais(mg.mesclado);
   if (mg.paraEnviar.length > 0) {
     const envio = await salvarGanhosRemotos(userId, mg.paraEnviar);
+    if (cancelada()) return cancelar();
     if (!envio.success) return registrarFalha(envio.error);
     enviados += envio.data;
   }
@@ -223,12 +245,14 @@ async function executarSync(
   // 2) Dívidas (com tombstones)
   const dividasLocais = await carregarDividasLocaisComRemovidas();
   const dividasRemotas = await buscarDividasRemotas(userId);
+  if (cancelada()) return cancelar();
   if (!dividasRemotas.success) return registrarFalha(dividasRemotas.error);
 
   const md = mesclarDividas(dividasLocais, dividasRemotas.data);
   if (md.recebidos > 0) await substituirDividasLocais(md.mesclado);
   if (md.paraEnviar.length > 0) {
     const envio = await salvarDividasRemotas(userId, md.paraEnviar);
+    if (cancelada()) return cancelar();
     if (!envio.success) return registrarFalha(envio.error);
     enviados += envio.data;
   }
@@ -237,6 +261,7 @@ async function executarSync(
   // 3) Meta base
   const metaLocal = await carregarMetaBaseComData();
   const metaRemota = await buscarMetaBaseRemota(userId);
+  if (cancelada()) return cancelar();
   if (!metaRemota.success) return registrarFalha(metaRemota.error);
 
   if (metaRemota.data && maisNovo(metaRemota.data.atualizadoEm, metaLocal.atualizadoEm || undefined)) {
@@ -244,10 +269,12 @@ async function executarSync(
     recebidos++;
   } else if (metaLocal.atualizadoEm && (!metaRemota.data || maisNovo(metaLocal.atualizadoEm, metaRemota.data.atualizadoEm))) {
     const envio = await salvarMetaBaseRemota(userId, metaLocal.metaBase, metaLocal.atualizadoEm);
+    if (cancelada()) return cancelar();
     if (!envio.success) return registrarFalha(envio.error);
     enviados++;
   }
 
+  if (cancelada()) return cancelar();
   const agora = new Date().toISOString();
   const estadoOk: EstadoSync = { status: 'ok', ultimaSync: agora, mensagem: 'Sincronizado com a nuvem.' };
   await salvarEstadoSyncPersistido(estadoOk);
