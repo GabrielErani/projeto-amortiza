@@ -4,11 +4,11 @@
 import { createClient } from '@supabase/supabase-js';
 import { MetaNumerica } from '../types';
 
-// Credenciais Reais do Projeto Supabase
-const SUPABASE_URL = 'https://ktywqlrpcyywfzwfdilg.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_yAALF0cgRkWFCUiVNcCD-Q_lFu_V...';
+// Credenciais Reais do Projeto Supabase (do arquivo .env.local)
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || 'https://prydkwocbaxshbjplfsv.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_JdJLR3X9PgDP7VPAONRkRg_466LRnXJ';
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
 /**
  * Salva (ou atualiza via upsert) um ganho do dia na tabela 'metas' do Supabase.
@@ -23,7 +23,6 @@ export async function salvarMetaSupabase(meta: MetaNumerica): Promise<{ success:
       percentual: meta.percentual,
     };
 
-    // Incluir data de referência se fornecida (formato YYYY-MM-DD)
     if (meta.data_referencia) {
       payload.data_referencia = meta.data_referencia;
     }
@@ -34,15 +33,6 @@ export async function salvarMetaSupabase(meta: MetaNumerica): Promise<{ success:
       .select();
 
     if (error) {
-      // Fallback: se a coluna data_referencia não existir ainda, salva sem ela
-      if (error.code === '42703') {
-        const { data: fallbackData, error: fallbackError } = await supabase
-          .from('metas')
-          .insert([{ descricao: meta.descricao, valor_meta: meta.valor_meta, valor_atingido: meta.valor_atingido, percentual: meta.percentual }])
-          .select();
-        if (fallbackError) return { success: false, error: fallbackError.message };
-        return { success: true, data: fallbackData as MetaNumerica[] };
-      }
       return { success: false, error: error.message };
     }
 
@@ -54,8 +44,6 @@ export async function salvarMetaSupabase(meta: MetaNumerica): Promise<{ success:
 
 /**
  * Busca os registros de metas para um intervalo de datas (semana atual).
- * @param dataInicio - Data de início no formato YYYY-MM-DD (segunda-feira)
- * @param dataFim    - Data de fim no formato YYYY-MM-DD (domingo)
  */
 export async function buscarMetasPorSemana(dataInicio: string, dataFim: string): Promise<{ success: boolean; data?: MetaNumerica[]; error?: string }> {
   try {
@@ -77,7 +65,7 @@ export async function buscarMetasPorSemana(dataInicio: string, dataFim: string):
 }
 
 /**
- * Busca todos os registros históricos (sem filtro de data).
+ * Busca todos os registros históricos.
  */
 export async function buscarMetasSupabase(): Promise<{ success: boolean; data?: MetaNumerica[]; error?: string }> {
   try {
