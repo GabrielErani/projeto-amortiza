@@ -18,8 +18,11 @@ const CHAVE_ESTADO_SYNC = '@amortiza_estado_sync_v1';
 
 const META_BASE_PADRAO = 100;
 
+// Os caches em memória são sempre iguais ou mais novos que o disco (toda gravação
+// passa por eles). Por isso, ao ler, o que está em memória prevalece: se uma
+// escrita no AsyncStorage falhar (ex.: disco cheio), o valor novo não é perdido.
 let cacheMemoriaGanhos: Record<string, RegistroGanhoLocal> = {};
-let cacheMemoriaMetaBase: number = META_BASE_PADRAO;
+let cacheMemoriaMetaBase: number | null = null;
 let cacheMemoriaMetaBaseAtualizadaEm: string | null = null;
 let cacheMemoriaDividas: DividaItem[] = []; // inclui tombstones (removido=true)
 let cacheMemoriaEstadoSync: EstadoSync | null = null;
@@ -50,9 +53,9 @@ export async function salvarGanhoLocalmente(registro: RegistroGanhoLocal): Promi
   };
   cacheMemoriaGanhos[completo.dataISO] = completo;
 
-  const mapa = (await lerJSON<Record<string, RegistroGanhoLocal>>(CHAVE_GANHOS)) || {};
-  mapa[completo.dataISO] = completo;
-  await gravarJSON(CHAVE_GANHOS, mapa);
+  // Mescla com o disco (para não perder dias gravados antes de o app abrir) e regrava tudo.
+  await carregarGanhosLocais();
+  await gravarJSON(CHAVE_GANHOS, cacheMemoriaGanhos);
 
   agendarSync();
 }
@@ -60,7 +63,7 @@ export async function salvarGanhoLocalmente(registro: RegistroGanhoLocal): Promi
 export async function carregarGanhosLocais(): Promise<Record<string, RegistroGanhoLocal>> {
   const mapa = await lerJSON<Record<string, RegistroGanhoLocal>>(CHAVE_GANHOS);
   if (mapa) {
-    cacheMemoriaGanhos = { ...cacheMemoriaGanhos, ...mapa };
+    cacheMemoriaGanhos = { ...mapa, ...cacheMemoriaGanhos };
   }
   return cacheMemoriaGanhos;
 }
@@ -93,6 +96,7 @@ export async function gravarMetaBaseLocal(metaBase: number, atualizadoEm: string
 }
 
 export async function carregarMetaBaseLocal(padrao: number = META_BASE_PADRAO): Promise<number> {
+  if (cacheMemoriaMetaBase !== null) return cacheMemoriaMetaBase;
   try {
     const val = await AsyncStorage.getItem(CHAVE_META_BASE);
     if (val) {
@@ -103,9 +107,9 @@ export async function carregarMetaBaseLocal(padrao: number = META_BASE_PADRAO): 
       }
     }
   } catch {
-    // Retorna cache
+    // Retorna o padrão
   }
-  return cacheMemoriaMetaBase || padrao;
+  return padrao;
 }
 
 /** Retorna a meta base e quando foi alterada (null se nunca foi alterada pelo usuário). */
@@ -124,7 +128,12 @@ export async function carregarMetaBaseComData(): Promise<{ metaBase: number; atu
 
 async function carregarDividasComTombstones(): Promise<DividaItem[]> {
   const lista = await lerJSON<DividaItem[]>(CHAVE_DIVIDAS);
-  if (lista) cacheMemoriaDividas = lista;
+  if (lista) {
+    // Disco primeiro, memória por cima: itens só em memória (escrita que falhou) são preservados.
+    const porId = new Map<string, DividaItem>(lista.map((d) => [d.id, d]));
+    for (const d of cacheMemoriaDividas) porId.set(d.id, d);
+    cacheMemoriaDividas = Array.from(porId.values());
+  }
   return cacheMemoriaDividas;
 }
 
@@ -200,7 +209,7 @@ export async function carregarEstadoSyncPersistido(): Promise<EstadoSync | null>
 /** Apaga todos os dados locais do app (ganhos, dívidas, meta base, estado de sync). */
 export async function limparDadosLocais(): Promise<void> {
   cacheMemoriaGanhos = {};
-  cacheMemoriaMetaBase = META_BASE_PADRAO;
+  cacheMemoriaMetaBase = null;
   cacheMemoriaMetaBaseAtualizadaEm = null;
   cacheMemoriaDividas = [];
   cacheMemoriaEstadoSync = null;

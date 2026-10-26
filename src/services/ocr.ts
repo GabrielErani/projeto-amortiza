@@ -49,17 +49,26 @@ export async function processarOCRLocal(imageUri: string): Promise<ResultadoOCR>
  * Função utilitária para extrair valores monetários ou numéricos do texto lido
  */
 function extrairValorNumerico(texto: string): number | null {
-  // Regex para identificar padrões monetários (ex: R$ 1.500,00 ou 1500.00 ou 1.500)
-  const regexMoeda = /(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*(?:,\d{2})?|\d+(?:\.\d{2})?)/i;
-  const match = texto.match(regexMoeda);
+  // Percentuais ("85%") nunca são valores em reais: removidos antes da busca.
+  const semPercentuais = texto.replace(/\d+(?:[.,]\d+)?\s*%/g, ' ');
 
-  if (match && match[1]) {
-    // Normaliza para formato de ponto flutuante padrão (ex: 1500.00)
-    let valorStr = match[1].replace(/\./g, '').replace(',', '.');
-    const valorNum = parseFloat(valorStr);
-    return isNaN(valorNum) ? null : valorNum;
-  }
-  return null;
+  // Formatos aceitos: milhar pt-BR (1.500 / 1.500,00), decimal (1500,00 / 1500.00 / 150.50) e inteiro (1500).
+  const padraoNumero = '(\\d{1,3}(?:\\.\\d{3})+(?:,\\d{1,2})?|\\d+(?:[.,]\\d{1,2})?)';
+
+  // 1) Prioriza um valor precedido de "R$"; 2) senão, o primeiro número do texto.
+  const comReais = semPercentuais.match(new RegExp('R\\$\\s*' + padraoNumero, 'i'));
+  const match = comReais ?? semPercentuais.match(new RegExp(padraoNumero));
+  if (!match) return null;
+
+  return normalizarNumeroBR(match[1]);
+}
+
+/** Converte "1.500,00" → 1500, "1500,00" → 1500, "150.50" → 150.5. */
+function normalizarNumeroBR(texto: string): number | null {
+  const temMilharPtBR = /^\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?$/.test(texto);
+  const normalizado = temMilharPtBR ? texto.replace(/\./g, '').replace(',', '.') : texto.replace(',', '.');
+  const valor = parseFloat(normalizado);
+  return isNaN(valor) ? null : valor;
 }
 
 /**

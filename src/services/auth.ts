@@ -44,7 +44,9 @@ export function traduzirErroAuth(mensagem: string): string {
     return 'Este e-mail já está cadastrado. Tente entrar.';
   }
   if (m.includes('password should be at least') || m.includes('weak password') || m.includes('password is too short')) {
-    return `A senha precisa ter pelo menos ${SENHA_MIN} caracteres.`;
+    // Usa o mínimo informado pelo Supabase quando ele vier na mensagem (ex.: "at least 8 characters")
+    const minimo = m.match(/at least (\d+)/)?.[1] ?? String(SENHA_MIN);
+    return `A senha precisa ter pelo menos ${minimo} caracteres.`;
   }
   if (m.includes('unable to validate email') || m.includes('invalid email') || m.includes('invalid format')) {
     return 'E-mail inválido. Verifique e tente novamente.';

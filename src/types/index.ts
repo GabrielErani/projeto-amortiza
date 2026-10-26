@@ -49,7 +49,7 @@ export interface DividaItem {
 // Representa uma semana do mês no seletor da Carteira
 export interface SemanaMesInfo {
   numeroSemana: number;
-  rotulo: string; // Ex: "Semana 1 (01-07 out)"
+  rotulo: string; // Ex: "Sem 2 (5–11 out)" ou "Sem 1 (28 set – 4 out)" quando cruza o mês
   dataInicioISO: string;
   dataFimISO: string;
   totalGanhos: number;

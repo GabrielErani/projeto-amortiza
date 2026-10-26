@@ -22,6 +22,11 @@ export function formatarDiaCompleto(date: Date): string {
   return `${diaSemana.charAt(0).toUpperCase() + diaSemana.slice(1)}, ${formatarDataExibicao(date)}`;
 }
 
+// "out"
+function mesCurto(date: Date): string {
+  return date.toLocaleDateString('pt-BR', { month: 'short' }).replace('.', '');
+}
+
 export function obterSegundaDaSemana(date: Date): Date {
   const d = new Date(date);
   const diaSemana = d.getDay();
@@ -57,12 +62,17 @@ export function gerarEstruturaSemana(hoje: Date): GanhoDia[] {
   });
 }
 
-// "20 out – 26 out"
+// "19 de out – 25 de out"
 export function formatarPeriodo(dias: GanhoDia[]): string {
   if (dias.length < 7) return '';
   return `${dias[0].dataExibicao} – ${dias[6].dataExibicao}`;
 }
 
+/**
+ * Semanas (Seg–Dom) que tocam o mês de `hoje`. `totalGanhos` soma a semana inteira,
+ * inclusive dias do mês vizinho; para o total do mês use `somarGanhosDoMes`.
+ * Rótulos: "Sem 2 (5–11 out)" ou, quando a semana cruza o mês, "Sem 1 (28 set – 4 out)".
+ */
 export function gerarSemanasDoMes(
   hoje: Date,
   ganhosLocais: Record<string, RegistroGanhoLocal>
@@ -93,10 +103,14 @@ export function gerarSemanasDoMes(
       if (reg) totalSem += Number(reg.valor || 0);
     }
 
-    const mesCurto = cursor.toLocaleDateString('pt-BR', { month: 'short' }).replace('.', '');
+    const intervalo =
+      cursor.getMonth() === fimSemana.getMonth()
+        ? `${cursor.getDate()}–${fimSemana.getDate()} ${mesCurto(cursor)}`
+        : `${cursor.getDate()} ${mesCurto(cursor)} – ${fimSemana.getDate()} ${mesCurto(fimSemana)}`;
+
     semanas.push({
       numeroSemana: numSemana,
-      rotulo: `Sem ${numSemana} (${cursor.getDate()}–${fimSemana.getDate()} ${mesCurto})`,
+      rotulo: `Sem ${numSemana} (${intervalo})`,
       dataInicioISO: toISOLocal(cursor),
       dataFimISO: toISOLocal(fimSemana),
       totalGanhos: totalSem,
@@ -108,4 +122,13 @@ export function gerarSemanasDoMes(
   }
 
   return semanas;
+}
+
+/** Soma apenas os ganhos com data dentro do mês de `hoje` (o card "Total do Mês" da Carteira). */
+export function somarGanhosDoMes(hoje: Date, ganhosLocais: Record<string, RegistroGanhoLocal>): number {
+  const prefixoMes = toISOLocal(hoje).slice(0, 7); // "YYYY-MM"
+  return Object.values(ganhosLocais).reduce(
+    (acc, reg) => (reg.dataISO.startsWith(prefixoMes) ? acc + (Number(reg.valor) || 0) : acc),
+    0
+  );
 }
