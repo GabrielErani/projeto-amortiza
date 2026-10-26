@@ -698,3 +698,55 @@ describe('troca de usuário durante a sincronização', () => {
     expect(remoto.salvarGanhosRemotos).not.toHaveBeenCalledWith('usuario-b', expect.anything());
   });
 });
+
+describe('troca de conta no mesmo aparelho', () => {
+  // A sessão pode terminar fora do "Sair" (token expirado/revogado): o App volta ao login sem
+  // limpar o aparelho. Se OUTRA conta entrar, os dados locais da anterior não podem ir para ela.
+  it('outra conta entrando depois de uma sessão encerrada sem limpeza não herda os dados locais', async () => {
+    sync.definirUsuarioSync('usuario-a');
+    await esvaziarFila();
+    await storage.salvarGanhoLocalmente(ganho('2020-01-10', 999, T2));
+    sync.definirUsuarioSync(null); // sessão caiu: ninguém chamou limparDadosLocais
+    remoto.salvarGanhosRemotos.mockClear();
+
+    sync.definirUsuarioSync('usuario-b');
+    await esvaziarFila();
+
+    expect(remoto.salvarGanhosRemotos).not.toHaveBeenCalled();
+    expect(await storage.carregarGanhosLocais()).toEqual({});
+    expect(await storage.carregarUltimoUsuarioId()).toBe('usuario-b');
+  });
+
+  it('o mesmo usuário voltando mantém e envia o que ficou só no aparelho', async () => {
+    sync.definirUsuarioSync('usuario-a');
+    await esvaziarFila();
+    await storage.salvarGanhoLocalmente(ganho('2020-01-10', 50, T2));
+    sync.definirUsuarioSync(null);
+    remoto.salvarGanhosRemotos.mockClear();
+
+    sync.definirUsuarioSync('usuario-a');
+    await esvaziarFila();
+
+    expect(remoto.salvarGanhosRemotos).toHaveBeenCalledWith('usuario-a', [
+      expect.objectContaining({ dataISO: '2020-01-10', valor: 50 }),
+    ]);
+  });
+
+  it('o primeiro login do aparelho leva para a conta o que foi lançado sem conta', async () => {
+    await storage.salvarGanhoLocalmente(ganho('2020-01-10', 80, T2));
+
+    sync.definirUsuarioSync('usuario-a');
+    await esvaziarFila();
+
+    expect(remoto.salvarGanhosRemotos).toHaveBeenCalledWith('usuario-a', [expect.objectContaining({ valor: 80 })]);
+  });
+
+  it('se o usuário sair enquanto o aparelho é preparado, a sincronização não começa', async () => {
+    sync.definirUsuarioSync('usuario-a');
+    sync.definirUsuarioSync(null);
+    await esvaziarFila();
+
+    expect(remoto.verificarConexao).not.toHaveBeenCalled();
+    expect(sync.obterEstadoSync().status).toBe('sem_conta');
+  });
+});

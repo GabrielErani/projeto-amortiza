@@ -37,6 +37,11 @@ function indiceSemanaAtual(hoje: Date): number {
   return Math.max(0, gerarSemanasDoMes(hoje, {}).findIndex((s) => s.isAtual));
 }
 
+// Posição de hoje na semana Seg–Dom (o app abre com o dia de hoje selecionado)
+function indiceDeHoje(hoje: Date): number {
+  return Math.max(0, gerarEstruturaSemana(hoje).findIndex((d) => d.isHoje));
+}
+
 export function useDadosApp(usuarioId: string | null) {
   // "Hoje" fica estável entre renders e só avança quando o dia vira (checado ao recarregar)
   const [hoje, setHoje] = useState<Date>(() => new Date());
@@ -47,7 +52,7 @@ export function useDadosApp(usuarioId: string | null) {
   const [dividas, setDividas] = useState<DividaItem[]>([]);
 
   // Seleções e refresh
-  const [diaSelecionadoIdx, setDiaSelecionadoIdx] = useState<number>(0);
+  const [diaSelecionadoIdx, setDiaSelecionadoIdx] = useState<number>(() => indiceDeHoje(hoje));
   const [semanaMesSelecionadaIdx, setSemanaMesSelecionadaIdx] = useState<number>(() => indiceSemanaAtual(hoje));
   const [atualizando, setAtualizando] = useState<boolean>(false);
 
@@ -65,12 +70,27 @@ export function useDadosApp(usuarioId: string | null) {
 
   // Modal de lançamento de ganho (manual e OCR)
   const [modalGanhoAberto, setModalGanhoAberto] = useState<boolean>(false);
-  const [diaLancamentoIdx, setDiaLancamentoIdx] = useState<number>(0);
+  const [diaLancamentoIdx, setDiaLancamentoIdx] = useState<number>(() => indiceDeHoje(hoje));
   const [valorDigitado, setValorDigitado] = useState<string>('');
   const [salvando, setSalvando] = useState<boolean>(false);
   const [analisandoOCR, setAnalisandoOCR] = useState<boolean>(false);
   const [ocrConfirmacaoPronta, setOcrConfirmacaoPronta] = useState<boolean>(false);
   const [valorExtraidoOCR, setValorExtraidoOCR] = useState<number>(0);
+  // Pausa de 1 s entre o fim da leitura e a confirmação do OCR; cancelada se o modal fechar antes
+  const timerOCR = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelarTimerOCR = useCallback(() => {
+    if (timerOCR.current) {
+      clearTimeout(timerOCR.current);
+      timerOCR.current = null;
+    }
+  }, []);
+  useEffect(() => cancelarTimerOCR, [cancelarTimerOCR]);
+
+  const fecharModalGanho = useCallback(() => {
+    cancelarTimerOCR();
+    setAnalisandoOCR(false);
+    setModalGanhoAberto(false);
+  }, [cancelarTimerOCR]);
 
   // ─── DADOS DERIVADOS ────────────────────────────────────────────────────────
   // Semana Seg–Dom com os ganhos salvos e a Regra Amortiza (cascata) aplicada
@@ -152,6 +172,7 @@ export function useDadosApp(usuarioId: string | null) {
 
   // ─── LANÇAMENTO DE GANHO ────────────────────────────────────────────────────
   const abrirModalParaDia = (idx: number) => {
+    cancelarTimerOCR();
     setDiaLancamentoIdx(idx);
     setValorDigitado('');
     setAnalisandoOCR(false);
@@ -236,6 +257,8 @@ export function useDadosApp(usuarioId: string | null) {
 
       if (!pickerResult.canceled && pickerResult.assets && pickerResult.assets.length > 0) {
         const uri = pickerResult.assets[0].uri;
+        cancelarTimerOCR();
+        setDiaLancamentoIdx(diaSelecionadoIdx); // o print vale para o dia selecionado no gráfico
         setModalGanhoAberto(true);
         setAnalisandoOCR(true);
         setOcrConfirmacaoPronta(false);
@@ -245,7 +268,8 @@ export function useDadosApp(usuarioId: string | null) {
         setValorExtraidoOCR(val);
         setValorDigitado(val > 0 ? val.toFixed(2) : '');
 
-        setTimeout(() => {
+        timerOCR.current = setTimeout(() => {
+          timerOCR.current = null;
           setAnalisandoOCR(false);
           setOcrConfirmacaoPronta(true);
         }, 1000);
@@ -380,7 +404,7 @@ export function useDadosApp(usuarioId: string | null) {
     onAlterarValor: setValorDigitado,
     onSalvar: handleExecutarSalvarGanho,
     onDigitarManualmente: () => setOcrConfirmacaoPronta(false),
-    onFechar: () => setModalGanhoAberto(false),
+    onFechar: fecharModalGanho,
   };
 
   return {

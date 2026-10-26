@@ -62,7 +62,7 @@ export function CarteiraScreen({
             R$ {totalMes.toFixed(2)}
           </Text>
           <Text style={styles.macroCardSub}>
-            Todas as semanas somadas
+            Só os dias deste mês
           </Text>
         </View>
       </View>

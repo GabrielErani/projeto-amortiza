@@ -522,3 +522,28 @@ describe('fallback em memória quando só a escrita falha (leitura funciona)', (
     expect(lista.map((d) => d.id)).toEqual(['x', 'a', 'b']);
   });
 });
+
+describe('último usuário do aparelho', () => {
+  it('guarda e relê o id, e limparDadosLocais não o apaga', async () => {
+    expect(await storage.carregarUltimoUsuarioId()).toBeNull();
+    await storage.salvarUltimoUsuarioId('u1');
+
+    expect(await storage.carregarUltimoUsuarioId()).toBe('u1');
+    await storage.limparDadosLocais();
+    expect(await storage.carregarUltimoUsuarioId()).toBe('u1');
+    expect(await AsyncStorage.getItem('@amortiza_ultimo_usuario_v1')).toBe('u1');
+  });
+
+  it('mantém o id em memória se a escrita no disco falhar', async () => {
+    AsyncStorage.setItem.mockRejectedValueOnce(new Error('database or disk is full'));
+    await storage.salvarUltimoUsuarioId('u2');
+
+    expect(await storage.carregarUltimoUsuarioId()).toBe('u2');
+  });
+
+  it('relê do disco o id gravado antes de o app reabrir', async () => {
+    await AsyncStorage.setItem('@amortiza_ultimo_usuario_v1', 'u3');
+
+    expect(await storage.carregarUltimoUsuarioId()).toBe('u3');
+  });
+});
