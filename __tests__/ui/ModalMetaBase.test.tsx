@@ -1,100 +1,127 @@
-// Testes de src/components/ModalMetaBase.tsx: modal central "Meta Diária Base".
-// O Modal do preset de testes do React Native não renderiza nada quando visible={false}.
-
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react-native';
-import { ModalMetaBase, type ModalMetaBaseProps } from '../../src/components/ModalMetaBase';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { ModalMetaBase } from '../../src/components/ModalMetaBase';
 
-async function renderizar(props: Partial<ModalMetaBaseProps> = {}) {
-  const callbacks = {
-    onAlterarValor: jest.fn(),
-    onSalvar: jest.fn(),
+type Props = React.ComponentProps<typeof ModalMetaBase>;
+
+const indicadoresDeCarregamento = () =>
+  screen.container.queryAll((el) => el.type === 'ActivityIndicator');
+
+async function renderizar(over: Partial<Props> = {}) {
+  const props: Props = {
+    visivel: true,
+    metaAtual: 100,
     onFechar: jest.fn(),
+    onSalvar: jest.fn().mockResolvedValue(undefined),
+    ...over,
   };
-  await render(<ModalMetaBase visivel valor="100" {...callbacks} {...props} />);
-  return callbacks;
+  await render(<ModalMetaBase {...props} />);
+  return props;
 }
 
-const modaisAbertos = () => screen.container.queryAll((el) => el.type === 'Modal');
+const campo = () => screen.getByPlaceholderText('100');
 
 describe('ModalMetaBase', () => {
-  it('não mostra nada quando está fechado', async () => {
+  it('invisível, não renderiza nada', async () => {
     await renderizar({ visivel: false });
 
-    expect(modaisAbertos()).toHaveLength(0);
-    expect(screen.queryByText('Meta Diária Base')).not.toBeOnTheScreen();
+    expect(screen.queryByText('Meta diária')).not.toBeOnTheScreen();
   });
 
-  it('mostra título, pergunta, rótulo e os botões quando está aberto', async () => {
+  it('mostra título, subtítulo e o campo preenchido com a meta atual', async () => {
+    await renderizar({ metaAtual: 150 });
+
+    expect(screen.getByText('Meta diária')).toBeOnTheScreen();
+    expect(screen.getByText('Quanto você quer fazer por dia?')).toBeOnTheScreen();
+    expect(screen.getByText('Valor base (R$)')).toBeOnTheScreen();
+    expect(campo()).toHaveDisplayValue('150');
+    expect(campo()).toHaveProp('keyboardType', 'numeric');
+  });
+
+  it('meta com centavos aparece no formato brasileiro', async () => {
+    await renderizar({ metaAtual: 150.5 });
+
+    expect(campo()).toHaveDisplayValue('150,50');
+  });
+
+  it('salvar envia o valor convertido para número', async () => {
+    const props = await renderizar();
+
+    await fireEvent.changeText(campo(), '1.234,56');
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+    expect(props.onSalvar).toHaveBeenCalledTimes(1);
+    expect(props.onSalvar).toHaveBeenCalledWith(1234.56);
+  });
+
+  it('salvar sem alterar envia a meta atual', async () => {
+    const props = await renderizar({ metaAtual: 120 });
+
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+    expect(props.onSalvar).toHaveBeenCalledWith(120);
+  });
+
+  it.each(['', '0', 'abc', '-50'])('valor inválido "%s" mostra erro e não salva', async (valor) => {
+    const props = await renderizar();
+
+    await fireEvent.changeText(campo(), valor);
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+    expect(screen.getByText('A meta precisa ser maior que zero.')).toBeOnTheScreen();
+    expect(props.onSalvar).not.toHaveBeenCalled();
+  });
+
+  it('o erro some quando o usuário volta a digitar', async () => {
     await renderizar();
+    await fireEvent.changeText(campo(), '0');
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
 
-    expect(modaisAbertos()).toHaveLength(1);
-    expect(screen.getByText('Meta Diária Base')).toBeOnTheScreen();
-    expect(screen.getByText('Qual é o seu objetivo padrão de ganho por dia?')).toBeOnTheScreen();
-    expect(screen.getByText('Valor Base (R$)')).toBeOnTheScreen();
-    expect(screen.getByText('Cancelar')).toBeOnTheScreen();
-    expect(screen.getByText('Salvar Meta')).toBeOnTheScreen();
+    await fireEvent.changeText(campo(), '80');
+
+    expect(screen.queryByText('A meta precisa ser maior que zero.')).not.toBeOnTheScreen();
   });
 
-  it('abre como modal transparente com animação de fade', async () => {
-    await renderizar();
+  it('"Cancelar" chama onFechar sem salvar', async () => {
+    const props = await renderizar();
 
-    const [modal] = modaisAbertos();
-    expect(modal).toHaveProp('transparent', true);
-    expect(modal).toHaveProp('animationType', 'fade');
+    await fireEvent.changeText(campo(), '999');
+    await fireEvent.press(screen.getByRole('button', { name: 'Cancelar' }));
+
+    expect(props.onFechar).toHaveBeenCalledTimes(1);
+    expect(props.onSalvar).not.toHaveBeenCalled();
   });
 
-  it('exibe o valor atual no campo numérico com foco automático', async () => {
-    await renderizar({ valor: '150' });
+  it('ao reabrir, descarta o texto anterior, o erro e mostra a meta atual', async () => {
+    const props = await renderizar({ metaAtual: 100 });
+    await fireEvent.changeText(campo(), '0');
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+    expect(screen.getByText('A meta precisa ser maior que zero.')).toBeOnTheScreen();
 
-    const campo = screen.getByPlaceholderText('Ex: 100.00');
-    expect(campo).toHaveDisplayValue('150');
-    expect(campo).toHaveProp('keyboardType', 'numeric');
-    expect(campo).toHaveProp('autoFocus', true);
+    await screen.rerender(<ModalMetaBase {...props} visivel={false} metaAtual={130} />);
+    await screen.rerender(<ModalMetaBase {...props} visivel metaAtual={130} />);
+
+    expect(campo()).toHaveDisplayValue('130');
+    expect(screen.queryByText('A meta precisa ser maior que zero.')).not.toBeOnTheScreen();
   });
 
-  it('repassa o texto digitado para onAlterarValor', async () => {
-    const { onAlterarValor, onSalvar } = await renderizar({ valor: '' });
+  it('enquanto salva, o botão "Salvar" mostra carregamento e fica desabilitado', async () => {
+    let concluir: () => void = () => {};
+    const onSalvar = jest.fn(() => new Promise<void>((resolve) => { concluir = resolve; }));
+    await renderizar({ onSalvar });
+    const salvar = screen.getByRole('button', { name: 'Salvar' });
 
-    await fireEvent.changeText(screen.getByPlaceholderText('Ex: 100.00'), '250,50');
-
-    expect(onAlterarValor).toHaveBeenCalledTimes(1);
-    expect(onAlterarValor).toHaveBeenCalledWith('250,50');
-    expect(onSalvar).not.toHaveBeenCalled();
-  });
-
-  it('"Salvar Meta" chama onSalvar', async () => {
-    const { onSalvar, onFechar } = await renderizar();
-
-    await fireEvent.press(screen.getByText('Salvar Meta'));
-
+    // Não aguardamos o press: o handler só termina quando onSalvar resolver.
+    const envio = fireEvent.press(salvar);
+    await waitFor(() => expect(salvar).toBeDisabled());
+    expect(indicadoresDeCarregamento()).toHaveLength(1);
+    await fireEvent.press(salvar);
     expect(onSalvar).toHaveBeenCalledTimes(1);
-    expect(onFechar).not.toHaveBeenCalled();
-  });
 
-  it('"Cancelar" chama onFechar', async () => {
-    const { onSalvar, onFechar } = await renderizar();
+    await act(async () => concluir());
+    await envio;
 
-    await fireEvent.press(screen.getByText('Cancelar'));
-
-    expect(onFechar).toHaveBeenCalledTimes(1);
-    expect(onSalvar).not.toHaveBeenCalled();
-  });
-
-  it('o botão "voltar" do Android (onRequestClose) chama onFechar', async () => {
-    const { onFechar } = await renderizar();
-
-    await fireEvent(modaisAbertos()[0], 'requestClose');
-
-    expect(onFechar).toHaveBeenCalledTimes(1);
-  });
-
-  it('reflete um novo valor recebido por props', async () => {
-    const callbacks = { onAlterarValor: jest.fn(), onSalvar: jest.fn(), onFechar: jest.fn() };
-    await render(<ModalMetaBase visivel valor="100" {...callbacks} />);
-
-    await screen.rerender(<ModalMetaBase visivel valor="180" {...callbacks} />);
-
-    expect(screen.getByPlaceholderText('Ex: 100.00')).toHaveDisplayValue('180');
+    expect(screen.getByRole('button', { name: 'Salvar' })).toBeEnabled();
+    expect(indicadoresDeCarregamento()).toHaveLength(0);
   });
 });

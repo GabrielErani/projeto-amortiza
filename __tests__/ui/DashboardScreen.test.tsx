@@ -1,312 +1,244 @@
-// Testes de src/screens/DashboardScreen.tsx: ganho total da semana, dia selecionado, gráfico de barras
-// da amortização por fases e card "Regra Amortiza".
-//
-// A semana é gerada pelas funções reais de src/utils (gerarEstruturaSemana + calcularAmortizacaoPorFases)
-// para uma data fixa: quarta-feira, 21/10/2026 (semana de 19 a 25 de outubro).
-
 import React from 'react';
 import { StyleSheet } from 'react-native';
 import { fireEvent, render, screen } from '@testing-library/react-native';
-import type { TestInstance } from 'test-renderer';
-import { DashboardScreen, type DashboardScreenProps } from '../../src/screens/DashboardScreen';
-import { cores, corPorStatus } from '../../src/theme';
-import type { GanhoDia } from '../../src/types';
+import { DashboardScreen } from '../../src/screens/DashboardScreen';
+import { ALVO_TOQUE, cores, fonte, superficies, tamanho, textos } from '../../src/theme';
+import { GanhoDia } from '../../src/types';
 import { calcularAmortizacaoPorFases } from '../../src/utils/amortizacao';
 import { gerarEstruturaSemana } from '../../src/utils/datas';
 
-const HOJE = new Date(2026, 9, 21, 10, 0); // quarta-feira
-const IDX_SEG = 0;
-const IDX_QUA = 2; // hoje
-const IDX_QUI = 3;
+type Props = React.ComponentProps<typeof DashboardScreen>;
 
-/** Semana Seg–Dom com os ganhos informados e a cascata aplicada (como no useDadosApp). */
-function semanaCom(valores: number[], meta = 100): GanhoDia[] {
-  const estrutura = gerarEstruturaSemana(HOJE).map((dia, i) =>
-    valores[i] ? { ...dia, valor: valores[i], temRegistro: true } : dia
-  );
+// Semana fixa: hoje = quarta, 21/10/2026 (semana de 19 a 25/10), meta R$ 100/dia.
+// Ganhos: Seg 250, Qua 30, Sex 120 →
+//   Seg 100% (batida) | Ter 100% (adiantada por Seg) | Qua 80% (parcial) | Qui 0%
+//   Sex 100% (batida) | Sáb 20% (adiantada por Sex) | Dom 0%
+// Total R$ 400; 3/7 dias cobertos; cobertura 400 de 700 → 57%.
+const HOJE = new Date(2026, 9, 21);
+function semana(valores: number[], meta = 100): GanhoDia[] {
+  const estrutura = gerarEstruturaSemana(HOJE).map((d, i) => ({ ...d, valor: valores[i] ?? 0, temRegistro: (valores[i] ?? 0) > 0 }));
   return calcularAmortizacaoPorFases(estrutura, meta);
 }
+const DIAS = semana([250, 0, 30, 0, 120, 0, 0]);
 
-/** Props derivadas da semana exatamente como o useDadosApp calcula. */
-function propsDaSemana(diasSemana: GanhoDia[], meta = 100) {
-  return {
-    diasSemana,
-    metaDiariaBase: meta,
-    totalSemana: diasSemana.reduce((acc, d) => acc + d.valor, 0),
-    totalCobertoSemana: diasSemana.reduce((acc, d) => acc + d.valorCoberto, 0),
-    diasAmortizadosCompletos: diasSemana.filter((d) => d.percentual === 100).length,
-  };
-}
-
-// Seg 250 → Seg 100% (atingida), Ter 100% (adiantada), Qua 50% (adiantada parcial); Qui 30 próprio (parcial).
-const SEMANA_PADRAO = semanaCom([250, 0, 0, 30, 0, 0, 0]);
-
-async function renderizar(props: Partial<DashboardScreenProps> = {}) {
-  const callbacks = {
+async function renderizar(over: Partial<Props> = {}) {
+  const props: Props = {
+    dias: DIAS,
+    diaSelecionadoIdx: 2,
     onSelecionarDia: jest.fn(),
-    onAbrirMetaBase: jest.fn(),
+    metaBase: 100,
+    onEditarMeta: jest.fn(),
     onLancarGanho: jest.fn(),
+    ...over,
   };
-  await render(
-    <DashboardScreen
-      {...propsDaSemana(SEMANA_PADRAO)}
-      diaSelecionadoIdx={IDX_QUA}
-      {...callbacks}
-      {...props}
-    />
-  );
-  return callbacks;
+  await render(<DashboardScreen {...props} />);
+  return props;
 }
 
-const estiloDe = (el: TestInstance) => StyleSheet.flatten(el.props.style) ?? {};
-
-/** Preenchimentos das 7 barras do gráfico, na ordem Seg → Dom. */
-const preenchimentosDasBarras = () =>
-  screen.container.queryAll((el) => {
-    const estilo = estiloDe(el);
-    return el.type === 'View' && estilo.width === '100%' && estilo.borderRadius === 11;
+// A barra de progresso é exposta como "progressbar" (valor 0–100); a largura do preenchimento acompanha o valor.
+const larguraDoProgresso = () =>
+  screen.getAllByRole('progressbar').map((trilha) => {
+    const [preenchimento] = trilha.children;
+    return typeof preenchimento === 'string' ? undefined : StyleSheet.flatten(preenchimento.props.style)?.width;
   });
+const linhaDaMeta = (texto: string) => screen.getByRole('button', { name: texto });
 
 describe('DashboardScreen', () => {
-  describe('ganho total da semana', () => {
-    it('mostra o rótulo, a meta diária no botão de configuração e o total formatado em pt-BR', async () => {
+  describe('resumo da semana', () => {
+    it('mostra o total da semana formatado em reais', async () => {
       await renderizar();
 
-      expect(screen.getByText('Ganho Total da Semana')).toBeOnTheScreen();
-      expect(screen.getByText('⚙️ Meta: R$ 100')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 280,00')).toBeOnTheScreen();
+      expect(screen.getByText('Ganho total da semana')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 400,00')).toHaveStyle(textos.hero);
     });
 
-    it('usa separador de milhar e centavos no total', async () => {
-      const semana = semanaCom([1000, 234.5, 0, 0, 0, 0, 0]);
-      await renderizar({ ...propsDaSemana(semana) });
+    it('mostra a meta semanal e quantos dias estão cobertos (inclui dias adiantados)', async () => {
+      await renderizar();
 
-      expect(screen.getByText('R$ 1.234,50')).toBeOnTheScreen();
+      expect(screen.getByText('Meta R$ 700 · 3/7 dias cobertos')).toBeOnTheScreen();
     });
 
-    it('mostra a meta sem casas decimais no botão de configuração', async () => {
-      const semana = semanaCom([0, 0, 0, 0, 0, 0, 0], 150.4);
-      await renderizar({ ...propsDaSemana(semana, 150.4) });
+    it('a barra de progresso reflete a cobertura da meta semanal', async () => {
+      await renderizar();
 
-      expect(screen.getByText('⚙️ Meta: R$ 150')).toBeOnTheScreen();
+      expect(larguraDoProgresso()).toEqual(['57%']);
     });
 
-    it('o botão da meta chama onAbrirMetaBase', async () => {
-      const { onAbrirMetaBase, onLancarGanho } = await renderizar();
+    it('a barra de progresso é acessível: papel, rótulo e valor de 0 a 100', async () => {
+      await renderizar();
 
-      await fireEvent.press(screen.getByText('⚙️ Meta: R$ 100'));
+      const barra = screen.getByRole('progressbar', { name: 'Cobertura da meta da semana' });
+      expect(barra).toHaveAccessibilityValue({ min: 0, max: 100, now: 57 });
+      expect(barra).toHaveStyle({ height: tamanho.trilha });
+    });
 
-      expect(onAbrirMetaBase).toHaveBeenCalledTimes(1);
-      expect(onLancarGanho).not.toHaveBeenCalled();
+    it('o progresso nunca passa de 100%', async () => {
+      await renderizar({ dias: semana([1000, 0, 0, 0, 0, 0, 0]), metaBase: 100 });
+
+      expect(screen.getByText('Meta R$ 700 · 7/7 dias cobertos')).toBeOnTheScreen();
+      expect(larguraDoProgresso()).toEqual(['100%']);
+      expect(screen.getByRole('progressbar')).toHaveAccessibilityValue({ now: 100 });
+    });
+
+    it('meta semanal acompanha a meta diária', async () => {
+      await renderizar({ dias: semana([150, 0, 0, 0, 0, 0, 0], 150), metaBase: 150 });
+
+      expect(screen.getByText('Meta R$ 1.050 · 1/7 dias cobertos')).toBeOnTheScreen();
+    });
+
+    it('a linha da meta é tocável (botão) e abre a meta base', async () => {
+      const props = await renderizar();
+
+      const linha = linhaDaMeta('Meta R$ 700 · 3/7 dias cobertos');
+      expect(linha).toHaveProp('accessibilityHint', 'Ajustar a meta diária');
+      await fireEvent.press(linha);
+
+      expect(props.onEditarMeta).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText('Ajustar')).not.toBeOnTheScreen();
+    });
+
+    it('a linha da meta tem o toque expandido até 44 sem crescer o layout (mais para baixo que para cima)', async () => {
+      await renderizar();
+
+      const { top, bottom } = linhaDaMeta('Meta R$ 700 · 3/7 dias cobertos').props.hitSlop;
+      expect(fonte.detalhe.fontSize + top + bottom).toBeGreaterThanOrEqual(ALVO_TOQUE);
+      expect(bottom).toBeGreaterThan(top);
     });
   });
 
-  describe('dia selecionado', () => {
-    it('sem ganho próprio: "Sem ganho trabalhado", status da cascata e botão "+ Inserir"', async () => {
-      await renderizar({ diaSelecionadoIdx: IDX_QUA });
+  describe('gráfico', () => {
+    it('renderiza as 7 barras com o percentual de cada dia', async () => {
+      await renderizar();
 
-      expect(screen.getByText('Quarta-feira, 21 de out:')).toBeOnTheScreen();
-      expect(screen.getByText('Sem ganho trabalhado')).toBeOnTheScreen();
-      // Aparece no destaque do dia e no card da Regra Amortiza
-      expect(screen.getAllByText('Status: 50% (Amortizado por Seg)')).toHaveLength(2);
-      expect(screen.getByText('+ Inserir')).toBeOnTheScreen();
-      expect(screen.queryByText('+ Adicionar')).not.toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Segunda-feira, 19 de out, 100% da meta' })).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Terça-feira, 20 de out, 100% da meta' })).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Quarta-feira, 21 de out, 80% da meta' })).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Quinta-feira, 22 de out, 0% da meta' })).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Sexta-feira, 23 de out, 100% da meta' })).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Sábado, 24 de out, 20% da meta' })).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Domingo, 25 de out, 0% da meta' })).toBeOnTheScreen();
     });
 
-    it('com ganho: "Fez R$ ..." em pt-BR e botão "+ Adicionar"', async () => {
-      await renderizar({ diaSelecionadoIdx: IDX_SEG });
+    it('tocar numa barra seleciona o dia pelo índice', async () => {
+      const props = await renderizar();
 
-      expect(screen.getByText('Segunda-feira, 19 de out:')).toBeOnTheScreen();
-      expect(screen.getByText('Fez R$ 250,00')).toBeOnTheScreen();
-      expect(screen.getAllByText('Status: 100% ✓')).toHaveLength(2);
-      expect(screen.getByText('+ Adicionar')).toBeOnTheScreen();
-      expect(screen.queryByText('+ Inserir')).not.toBeOnTheScreen();
-    });
+      await fireEvent.press(screen.getByRole('button', { name: 'Sábado, 24 de out, 20% da meta' }));
 
-    it('mostra quanto falta quando o dia tem ganho parcial sem cascata', async () => {
-      await renderizar({ diaSelecionadoIdx: IDX_QUI });
-
-      expect(screen.getByText('Fez R$ 30,00')).toBeOnTheScreen();
-      expect(screen.getAllByText('Status: 30% (Faltam R$ 70)')).toHaveLength(2);
-    });
-
-    it('o botão de lançar envia o índice do dia selecionado', async () => {
-      const { onLancarGanho, onSelecionarDia } = await renderizar({ diaSelecionadoIdx: IDX_QUA });
-
-      await fireEvent.press(screen.getByText('+ Inserir'));
-
-      expect(onLancarGanho).toHaveBeenCalledTimes(1);
-      expect(onLancarGanho).toHaveBeenCalledWith(IDX_QUA);
-      expect(onSelecionarDia).not.toHaveBeenCalled();
-    });
-
-    it('com índice fora da semana, exibe a segunda-feira', async () => {
-      await renderizar({ diaSelecionadoIdx: 9 });
-
-      expect(screen.getByText('Segunda-feira, 19 de out:')).toBeOnTheScreen();
-      expect(screen.getByText('Fez R$ 250,00')).toBeOnTheScreen();
-      expect(screen.getByText('📅 Segunda-feira, 19 de out:')).toBeOnTheScreen();
+      expect(props.onSelecionarDia).toHaveBeenCalledWith(5);
     });
   });
 
-  describe('gráfico de barras', () => {
-    it('mostra o percentual, a sigla de cada dia e o valor arredondado dos dias com ganho', async () => {
-      await renderizar();
+  describe('card do dia selecionado', () => {
+    it('hoje com ganho: mostra "dia, data · hoje", valor, status e o botão "Lançar ganho"', async () => {
+      const props = await renderizar({ diaSelecionadoIdx: 2 });
 
-      for (const sigla of ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']) {
-        expect(screen.getByText(sigla)).toBeOnTheScreen();
-      }
-      expect(screen.getAllByText('100%')).toHaveLength(2); // Seg e Ter
-      expect(screen.getByText('50%')).toBeOnTheScreen(); // Qua
-      expect(screen.getByText('30%')).toBeOnTheScreen(); // Qui
-      expect(screen.getAllByText('0%')).toHaveLength(3); // Sex, Sáb e Dom
-      expect(screen.getByText('R$250')).toBeOnTheScreen();
-      expect(screen.getByText('R$30')).toBeOnTheScreen();
-      expect(screen.queryByText('R$0')).not.toBeOnTheScreen();
+      expect(screen.getByText('Quarta, 21 out · hoje')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 30,00')).toHaveStyle(textos.titulo);
+      expect(screen.getByText('80% (Amortizado por Seg)')).toBeOnTheScreen();
+      expect(screen.queryByRole('button', { name: 'Adicionar' })).not.toBeOnTheScreen();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Lançar ganho' }));
+      expect(props.onLancarGanho).toHaveBeenCalledWith(2);
     });
 
-    it('arredonda o valor exibido abaixo da barra', async () => {
-      await renderizar({ ...propsDaSemana(semanaCom([87.5, 0, 0, 0, 0, 0, 0])) });
+    it('o botão "Lançar ganho" é primário e fica abaixo do valor, dentro do card', async () => {
+      await renderizar({ diaSelecionadoIdx: 2 });
 
-      expect(screen.getByText('R$88')).toBeOnTheScreen();
+      const botao = screen.getByRole('button', { name: 'Lançar ganho' });
+      const card = botao.parent!;
+      expect(botao).toHaveStyle({ backgroundColor: cores.primaria });
+      expect(card).toHaveStyle(superficies.cardBase);
+      expect(card.children[card.children.length - 1]).toBe(botao);
     });
 
-    it('mostra a legenda do gráfico', async () => {
-      await renderizar();
+    it('dia sem ganho próprio: valor zerado, status da cobertura e "Lançar ganho" com o índice do dia', async () => {
+      const props = await renderizar({ diaSelecionadoIdx: 1 });
 
-      expect(screen.getByText('Barras mostram o % amortizado de cada dia • Azul = Adiantado')).toBeOnTheScreen();
+      expect(screen.getByText('Terça, 20 out')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 0,00')).toBeOnTheScreen();
+      expect(screen.getByText('100% ✓ (Amortizado por Seg)')).toBeOnTheScreen();
+      expect(screen.queryByText(/· hoje/)).not.toBeOnTheScreen();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Lançar ganho' }));
+      expect(props.onLancarGanho).toHaveBeenCalledTimes(1);
+      expect(props.onLancarGanho).toHaveBeenCalledWith(1);
     });
 
-    it.each([
-      ['Seg', 0],
-      ['Ter', 1],
-      ['Qua', 2],
-      ['Qui', 3],
-      ['Sex', 4],
-      ['Sáb', 5],
-      ['Dom', 6],
-    ])('tocar na coluna "%s" seleciona o dia %i', async (sigla, indice) => {
-      const { onSelecionarDia, onLancarGanho } = await renderizar();
+    it.each<[number, string, string]>([
+      [0, '100% ✓', cores.primaria],
+      [1, '100% ✓ (Amortizado por Seg)', cores.info],
+      [2, '80% (Amortizado por Seg)', cores.alerta],
+      [5, '20% (Amortizado por Sex)', cores.alerta],
+    ])('dia %i mostra o status "%s" com o ponto na cor do status', async (idx, status, cor) => {
+      await renderizar({ diaSelecionadoIdx: idx });
 
-      await fireEvent.press(screen.getByText(sigla));
-
-      expect(onSelecionarDia).toHaveBeenCalledTimes(1);
-      expect(onSelecionarDia).toHaveBeenCalledWith(indice);
-      expect(onLancarGanho).not.toHaveBeenCalled();
+      const texto = screen.getByText(status);
+      const ponto = texto.parent?.children.find((c) => typeof c !== 'string' && c !== texto);
+      expect(ponto).toHaveStyle({ backgroundColor: cor });
     });
 
-    it('o percentual e o valor fazem parte da área de toque da coluna', async () => {
-      const { onSelecionarDia } = await renderizar();
+    it('dia pendente mostra 0% e cor neutra', async () => {
+      await renderizar({ diaSelecionadoIdx: 6 });
 
-      await fireEvent.press(screen.getByText('30%'));
-      await fireEvent.press(screen.getByText('R$250'));
-
-      expect(onSelecionarDia.mock.calls).toEqual([[IDX_QUI], [IDX_SEG]]);
+      expect(screen.getByText('Domingo, 25 out')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 0,00')).toBeOnTheScreen();
+      // "0%" aparece no gráfico (Qui e Dom) e no card do dia.
+      expect(screen.getAllByText('0%')).toHaveLength(3);
     });
 
-    it('cada barra usa a altura do percentual (mínimo 10%) e a cor do status', async () => {
-      await renderizar({ diaSelecionadoIdx: IDX_QUI });
+    it('acompanha a troca do dia selecionado', async () => {
+      const props = await renderizar({ diaSelecionadoIdx: 2 });
 
-      const barras = preenchimentosDasBarras();
-      expect(barras).toHaveLength(7);
-      expect(barras.map((b) => ({ height: estiloDe(b).height, cor: estiloDe(b).backgroundColor }))).toEqual([
-        { height: '100%', cor: corPorStatus('atingida') },
-        { height: '100%', cor: corPorStatus('adiantada') },
-        { height: '50%', cor: corPorStatus('parcial') },
-        { height: '30%', cor: corPorStatus('parcial') },
-        { height: '10%', cor: corPorStatus('pendente') },
-        { height: '10%', cor: corPorStatus('pendente') },
-        { height: '10%', cor: corPorStatus('pendente') },
-      ]);
+      await screen.rerender(<DashboardScreen {...props} diaSelecionadoIdx={4} />);
+
+      expect(screen.getByText('Sexta, 23 out')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 120,00')).toBeOnTheScreen();
+      await fireEvent.press(screen.getByRole('button', { name: 'Lançar ganho' }));
+      expect(props.onLancarGanho).toHaveBeenCalledWith(4);
     });
 
-    it('contorna em branco somente a barra do dia selecionado', async () => {
-      await renderizar({ diaSelecionadoIdx: IDX_QUI });
+    it('índice fora da semana cai no primeiro dia', async () => {
+      await renderizar({ diaSelecionadoIdx: 99 });
 
-      const comContorno = preenchimentosDasBarras().map((b) => estiloDe(b).borderColor === '#FFFFFF');
-      expect(comContorno).toEqual([false, false, false, true, false, false, false]);
-    });
-
-    it('destaca a sigla do dia selecionado e marca hoje em verde com um indicador', async () => {
-      await renderizar({ diaSelecionadoIdx: IDX_SEG });
-
-      expect(screen.getByText('Seg')).toHaveStyle({ color: '#FFFFFF', fontWeight: '700' });
-      expect(screen.getByText('Qua')).toHaveStyle({ color: cores.primaria });
-      expect(screen.getByText('Ter')).toHaveStyle({ color: cores.textoApagado });
-
-      const indicadoresDeHoje = screen.container.queryAll((el) => {
-        const estilo = estiloDe(el);
-        return el.type === 'View' && estilo.width === 4 && estilo.height === 4 && estilo.backgroundColor === cores.primaria;
-      });
-      expect(indicadoresDeHoje).toHaveLength(1);
-    });
-
-    it('pinta de verde o percentual dos dias 100% cobertos', async () => {
-      await renderizar({ diaSelecionadoIdx: IDX_QUI });
-
-      for (const rotulo of screen.getAllByText('100%')) {
-        expect(rotulo).toHaveStyle({ color: cores.primaria });
-      }
-      expect(screen.getByText('50%')).toHaveStyle({ color: cores.textoApagado });
+      expect(screen.getByText('Segunda, 19 out')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 250,00')).toBeOnTheScreen();
     });
   });
 
-  describe('card Regra Amortiza', () => {
-    it('mostra dias pagos, meta da semana, valor coberto e o progresso', async () => {
-      await renderizar();
+  it('a primeira página tem só o essencial: meta, 7 barras e "Lançar ganho"', async () => {
+    await renderizar();
 
-      expect(screen.getByText('⚡ Regra Amortiza')).toBeOnTheScreen();
-      expect(screen.getByText('2/7 Dias Pagos')).toBeOnTheScreen();
-      expect(screen.getByText('Progresso Semanal (Meta: R$ 700.00):')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 280.00 cobertos')).toBeOnTheScreen();
-      expect(screen.getByText('40% da semana concluída')).toBeOnTheScreen();
+    const botoes = screen.getAllByRole('button').map((b) => b.props.accessibilityLabel ?? '');
+    expect(botoes).toHaveLength(9);
+    expect(botoes.filter((r) => r.endsWith('da meta'))).toHaveLength(7);
+    expect(botoes).toContain('Lançar ganho');
+  });
+
+  describe('estados vazios', () => {
+    it('semana sem ganhos: total zerado e nenhum dia coberto', async () => {
+      await renderizar({ dias: semana([0, 0, 0, 0, 0, 0, 0]), diaSelecionadoIdx: 2 });
+
+      // Total da semana e valor do dia selecionado, ambos zerados.
+      expect(screen.getAllByText('R$ 0,00')).toHaveLength(2);
+      expect(screen.getByText('Meta R$ 700 · 0/7 dias cobertos')).toBeOnTheScreen();
+      expect(larguraDoProgresso()).toEqual(['0%']);
+      expect(screen.getByRole('button', { name: 'Lançar ganho' })).toBeOnTheScreen();
     });
 
-    it('a barra de progresso acompanha o percentual coberto', async () => {
-      await renderizar();
-
-      const [barraProgresso] = screen.container.queryAll(
-        (el) => el.type === 'View' && estiloDe(el).height === '100%' && estiloDe(el).width === '40%'
-      );
-      expect(barraProgresso).toBeDefined();
-      expect(barraProgresso).toHaveStyle({ backgroundColor: cores.primaria });
-    });
-
-    it('mostra o impacto do dia selecionado com ganho e meta base', async () => {
-      await renderizar({ diaSelecionadoIdx: IDX_SEG });
-
-      expect(screen.getByText('📅 Segunda-feira, 19 de out:')).toBeOnTheScreen();
-      expect(screen.getByText('Fez: R$ 250.00 • Meta Base: R$ 100.00')).toBeOnTheScreen();
-    });
-
-    it('semana completa: 7/7 dias pagos e 100% concluída', async () => {
-      await renderizar({ ...propsDaSemana(semanaCom([700, 0, 0, 0, 0, 0, 0])) });
-
-      expect(screen.getByText('7/7 Dias Pagos')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 700.00 cobertos')).toBeOnTheScreen();
-      expect(screen.getByText('100% da semana concluída')).toBeOnTheScreen();
-    });
-
-    it('semana vazia: 0/7, nada coberto e 0% concluída', async () => {
-      await renderizar({ ...propsDaSemana(semanaCom([0, 0, 0, 0, 0, 0, 0])) });
+    it('sem dias, não mostra barras nem card do dia', async () => {
+      await renderizar({ dias: [], diaSelecionadoIdx: 0 });
 
       expect(screen.getByText('R$ 0,00')).toBeOnTheScreen();
-      expect(screen.getByText('0/7 Dias Pagos')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 0.00 cobertos')).toBeOnTheScreen();
-      expect(screen.getByText('0% da semana concluída')).toBeOnTheScreen();
-      // 7 barras + o status em destaque do card ("Status: <Text>0%</Text>")
-      expect(screen.getAllByText('0%')).toHaveLength(8);
-      expect(screen.getAllByText('Status: 0%')).toHaveLength(2);
+      expect(screen.queryByRole('button', { name: /da meta$/ })).not.toBeOnTheScreen();
+      expect(screen.queryByRole('button', { name: 'Lançar ganho' })).not.toBeOnTheScreen();
+      expect(screen.queryByRole('button', { name: 'Adicionar' })).not.toBeOnTheScreen();
     });
 
-    it('usa a meta base informada para a meta da semana e o impacto do dia', async () => {
-      const semana = semanaCom([150, 0, 0, 0, 0, 0, 0], 150);
-      await renderizar({ ...propsDaSemana(semana, 150), diaSelecionadoIdx: IDX_SEG });
+    it('meta zero não quebra o cálculo de progresso', async () => {
+      await renderizar({ dias: semana([0, 0, 0, 0, 0, 0, 0], 0), metaBase: 0 });
 
-      expect(screen.getByText('⚙️ Meta: R$ 150')).toBeOnTheScreen();
-      expect(screen.getByText('Progresso Semanal (Meta: R$ 1050.00):')).toBeOnTheScreen();
-      expect(screen.getByText('Fez: R$ 150.00 • Meta Base: R$ 150.00')).toBeOnTheScreen();
-      expect(screen.getByText('14% da semana concluída')).toBeOnTheScreen();
+      expect(screen.getByText(/^Meta R\$ 0 · /)).toBeOnTheScreen();
+      expect(larguraDoProgresso()).toEqual(['0%']);
     });
   });
 });

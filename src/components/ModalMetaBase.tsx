@@ -1,95 +1,64 @@
-// Modal central para configurar a Meta Diária Base.
-// Documentação Modal: https://reactnative.dev/docs/modal
+import React, { useEffect, useState } from 'react';
+import { View } from 'react-native';
+import { layout } from '../theme';
+import { parseValorDigitado } from '../utils/formatacao';
+import { Botao } from './Botao';
+import { BottomSheet } from './BottomSheet';
+import { CampoTexto } from './CampoTexto';
 
-import React from 'react';
-import { Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { estilosCompartilhados } from '../styles/compartilhados';
-import { cores } from '../theme';
-
-export interface ModalMetaBaseProps {
+interface Props {
   visivel: boolean;
-  valor: string;
-  onAlterarValor: (texto: string) => void;
-  onSalvar: () => void;
+  metaAtual: number;
   onFechar: () => void;
+  onSalvar: (novaMeta: number) => Promise<void>;
 }
 
-export function ModalMetaBase({ visivel, valor, onAlterarValor, onSalvar, onFechar }: ModalMetaBaseProps) {
+export function ModalMetaBase({ visivel, metaAtual, onFechar, onSalvar }: Props) {
+  const [texto, setTexto] = useState(String(metaAtual));
+  const [erro, setErro] = useState<string | null>(null);
+  const [salvando, setSalvando] = useState(false);
+
+  useEffect(() => {
+    if (visivel) {
+      setTexto(metaAtual % 1 === 0 ? String(metaAtual) : metaAtual.toFixed(2).replace('.', ','));
+      setErro(null);
+    }
+  }, [visivel, metaAtual]);
+
+  const salvar = async () => {
+    const v = parseValorDigitado(texto);
+    if (v <= 0) {
+      setErro('A meta precisa ser maior que zero.');
+      return;
+    }
+    setSalvando(true);
+    try {
+      await onSalvar(v);
+    } finally {
+      setSalvando(false);
+    }
+  };
+
   return (
-    <Modal
-      visible={visivel}
-      animationType="fade"
-      transparent
-      onRequestClose={onFechar}
-    >
-      <View style={styles.modalOverlayCentral}>
-        <View style={styles.cardModalCentral}>
-          <Text style={styles.modalTitleText}>Meta Diária Base</Text>
-          <Text style={styles.modalSubText}>Qual é o seu objetivo padrão de ganho por dia?</Text>
-
-          <Text style={styles.inputLabel}>Valor Base (R$)</Text>
-          <TextInput
-            style={styles.modalInput}
-            keyboardType="numeric"
-            value={valor}
-            onChangeText={onAlterarValor}
-            placeholder="Ex: 100.00"
-            placeholderTextColor={cores.textoApagado}
-            autoFocus
-          />
-
-          <View style={styles.modalButtonsRow}>
-            <TouchableOpacity
-              style={styles.btnModalCancelar}
-              onPress={onFechar}
-            >
-              <Text style={styles.secondaryActionText}>Cancelar</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.btnModalConfirmar}
-              onPress={onSalvar}
-            >
-              <Text style={styles.primaryActionText}>Salvar Meta</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+    <BottomSheet visivel={visivel} onFechar={onFechar} titulo="Meta diária" subtitulo="Quanto você quer fazer por dia?">
+      <CampoTexto
+        label="Valor base (R$)"
+        grande
+        keyboardType="numeric"
+        value={texto}
+        onChangeText={(t) => {
+          setTexto(t);
+          if (erro) setErro(null);
+        }}
+        erro={erro}
+        placeholder="100"
+        autoFocus
+        selectTextOnFocus
+      />
+      <View style={[layout.linha, layout.gapSm]}>
+        <Botao titulo="Cancelar" variante="secundario" onPress={onFechar} estilo={layout.preencher} />
+        <Botao titulo="Salvar" onPress={salvar} carregando={salvando} estilo={layout.preencher} />
       </View>
-    </Modal>
+    </BottomSheet>
   );
 }
-
-const styles = {
-  ...estilosCompartilhados,
-  ...StyleSheet.create({
-    modalOverlayCentral: {
-      flex: 1,
-      backgroundColor: 'rgba(0, 0, 0, 0.75)',
-      justifyContent: 'center',
-      alignItems: 'center',
-      padding: 24,
-    },
-    modalButtonsRow: {
-      flexDirection: 'row',
-      gap: 12,
-      marginTop: 8,
-      width: '100%',
-    },
-    btnModalCancelar: {
-      flex: 1,
-      backgroundColor: 'transparent',
-      paddingVertical: 13,
-      borderRadius: 12,
-      alignItems: 'center',
-      borderWidth: 1,
-      borderColor: cores.neutro,
-    },
-    btnModalConfirmar: {
-      flex: 1,
-      backgroundColor: '#00D26A',
-      paddingVertical: 13,
-      borderRadius: 12,
-      alignItems: 'center',
-    },
-  }),
-};

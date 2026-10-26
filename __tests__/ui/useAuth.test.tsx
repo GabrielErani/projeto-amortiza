@@ -1,155 +1,120 @@
-// Testes de src/hooks/useAuth.ts: observa a sessão do Supabase Auth e liga/desliga a sincronização.
-//
-// observarSessao é mockado guardando o callback, para o teste emitir Usuario | null quando quiser.
-// O hook deve repassar o usuário para definirUsuarioSync (que já dispara a sincronização completa)
-// e nunca chamar sincronizarTudo diretamente.
-
 import { act, renderHook } from '@testing-library/react-native';
 import { useAuth } from '../../src/hooks/useAuth';
 import { observarSessao } from '../../src/services/auth';
 import { definirUsuarioSync, sincronizarTudo } from '../../src/services/sync';
-import type { Usuario } from '../../src/types';
+import { Usuario } from '../../src/types';
 
-jest.mock('../../src/services/auth', () => ({
-  observarSessao: jest.fn(),
-  entrar: jest.fn(),
-  cadastrar: jest.fn(),
-  recuperarSenha: jest.fn(),
-  sair: jest.fn(),
-}));
-
+jest.mock('../../src/services/auth', () => ({ observarSessao: jest.fn() }));
 jest.mock('../../src/services/sync', () => ({
   definirUsuarioSync: jest.fn(),
   sincronizarTudo: jest.fn(),
-  observarEstadoSync: jest.fn(),
-  obterEstadoSync: jest.fn(),
-  agendarSync: jest.fn(),
 }));
 
-const observarSessaoMock = jest.mocked(observarSessao);
-const definirUsuarioSyncMock = jest.mocked(definirUsuarioSync);
-const sincronizarTudoMock = jest.mocked(sincronizarTudo);
+const ANA: Usuario = { id: 'u-ana', email: 'ana@exemplo.com', nome: 'Ana' };
+const BIA: Usuario = { id: 'u-bia', email: 'bia@exemplo.com', nome: null };
 
-const JOAO: Usuario = { id: 'user-123', email: 'joao@exemplo.com', nome: 'João' };
-const MARIA: Usuario = { id: 'user-456', email: 'maria@exemplo.com', nome: null };
-
-let callbackSessao: ((usuario: Usuario | null) => void) | null;
+let emitirSessao: (usuario: Usuario | null) => void;
 const cancelarObservacao = jest.fn();
 
-/** Simula o Supabase Auth informando a sessão atual (login, logout, refresh). */
-async function emitirSessao(usuario: Usuario | null) {
-  await act(async () => {
-    callbackSessao?.(usuario);
-  });
-}
-
 beforeEach(() => {
-  callbackSessao = null;
-  cancelarObservacao.mockClear();
-  definirUsuarioSyncMock.mockReset();
-  sincronizarTudoMock.mockReset();
-  observarSessaoMock.mockReset().mockImplementation((cb) => {
-    callbackSessao = cb;
+  jest.clearAllMocks();
+  jest.mocked(observarSessao).mockImplementation((cb) => {
+    emitirSessao = cb;
     return cancelarObservacao;
   });
 });
 
+async function emitir(usuario: Usuario | null) {
+  await act(async () => {
+    emitirSessao(usuario);
+  });
+}
+
 describe('useAuth', () => {
-  it('começa sem usuário e carregando a sessão', async () => {
+  it('começa carregando a sessão, sem usuário, e assina observarSessao uma vez', async () => {
     const { result } = await renderHook(() => useAuth());
 
     expect(result.current).toEqual({ usuario: null, carregandoSessao: true });
-    expect(observarSessaoMock).toHaveBeenCalledTimes(1);
-    expect(observarSessaoMock).toHaveBeenCalledWith(expect.any(Function));
-    expect(definirUsuarioSyncMock).not.toHaveBeenCalled();
+    expect(observarSessao).toHaveBeenCalledTimes(1);
+    expect(observarSessao).toHaveBeenCalledWith(expect.any(Function));
+    expect(definirUsuarioSync).not.toHaveBeenCalled();
   });
 
-  it('sessão com usuário: expõe o usuário, encerra o carregamento e liga a sync com o id', async () => {
+  it('emissão de usuário: expõe o usuário, encerra o carregamento e passa o id para o sync', async () => {
     const { result } = await renderHook(() => useAuth());
 
-    await emitirSessao(JOAO);
+    await emitir(ANA);
 
-    expect(result.current.usuario).toBe(JOAO);
-    expect(result.current.carregandoSessao).toBe(false);
-    expect(definirUsuarioSyncMock).toHaveBeenCalledTimes(1);
-    expect(definirUsuarioSyncMock).toHaveBeenCalledWith('user-123');
+    expect(result.current).toEqual({ usuario: ANA, carregandoSessao: false });
+    expect(definirUsuarioSync).toHaveBeenCalledTimes(1);
+    expect(definirUsuarioSync).toHaveBeenCalledWith('u-ana');
   });
 
-  it('não chama sincronizarTudo diretamente (definirUsuarioSync já dispara a sincronização)', async () => {
+  // Regressão: o hook chamava sincronizarTudo além de definirUsuarioSync (que já sincroniza ao trocar
+  // de usuário), e cada login rodava duas sincronizações completas.
+  it('não chama sincronizarTudo diretamente: definirUsuarioSync já dispara a sincronização', async () => {
     await renderHook(() => useAuth());
 
-    await emitirSessao(JOAO);
-    await emitirSessao(JOAO);
-    await emitirSessao(null);
-    await emitirSessao(MARIA);
+    await emitir(ANA);
+    await emitir({ ...ANA, nome: 'Ana Maria' });
+    await emitir(BIA);
 
-    expect(sincronizarTudoMock).not.toHaveBeenCalled();
+    expect(sincronizarTudo).not.toHaveBeenCalled();
+    expect(jest.mocked(definirUsuarioSync).mock.calls).toEqual([['u-ana'], ['u-ana'], ['u-bia']]);
   });
 
-  it('sessão vazia: sem usuário, carregamento encerrado e sync desligada (null)', async () => {
+  it('troca de usuário expõe o novo usuário', async () => {
     const { result } = await renderHook(() => useAuth());
 
-    await emitirSessao(null);
+    await emitir(ANA);
+    await emitir(BIA);
+
+    expect(result.current.usuario).toEqual(BIA);
+    expect(definirUsuarioSync).toHaveBeenLastCalledWith('u-bia');
+  });
+
+  it('emissão null (sem sessão): encerra o carregamento e desliga a sincronização', async () => {
+    const { result } = await renderHook(() => useAuth());
+
+    await emitir(null);
 
     expect(result.current).toEqual({ usuario: null, carregandoSessao: false });
-    expect(definirUsuarioSyncMock).toHaveBeenCalledTimes(1);
-    expect(definirUsuarioSyncMock).toHaveBeenCalledWith(null);
+    expect(definirUsuarioSync).toHaveBeenCalledTimes(1);
+    expect(definirUsuarioSync).toHaveBeenCalledWith(null);
   });
 
-  it('logout depois do login desliga a sync', async () => {
+  it('logout: emissão null depois de logado limpa o usuário e passa null para o sync', async () => {
     const { result } = await renderHook(() => useAuth());
 
-    await emitirSessao(JOAO);
-    await emitirSessao(null);
+    await emitir(ANA);
+    await emitir(null);
 
-    expect(result.current.usuario).toBeNull();
-    expect(result.current.carregandoSessao).toBe(false);
-    expect(definirUsuarioSyncMock.mock.calls).toEqual([['user-123'], [null]]);
+    expect(result.current).toEqual({ usuario: null, carregandoSessao: false });
+    expect(jest.mocked(definirUsuarioSync).mock.calls).toEqual([['u-ana'], [null]]);
   });
 
-  it('troca de conta repassa o novo id', async () => {
-    const { result } = await renderHook(() => useAuth());
+  it('logout seguido de novo login do mesmo usuário passa o id de novo para o sync', async () => {
+    await renderHook(() => useAuth());
 
-    await emitirSessao(JOAO);
-    await emitirSessao(MARIA);
+    await emitir(ANA);
+    await emitir(null);
+    await emitir(ANA);
 
-    expect(result.current.usuario).toBe(MARIA);
-    expect(definirUsuarioSyncMock.mock.calls).toEqual([['user-123'], ['user-456']]);
+    expect(jest.mocked(definirUsuarioSync).mock.calls).toEqual([['u-ana'], [null], ['u-ana']]);
   });
 
-  it('reemissão do mesmo usuário (ex.: token renovado) repassa o mesmo id; o serviço de sync ignora', async () => {
-    const { result } = await renderHook(() => useAuth());
-
-    await emitirSessao(JOAO);
-    await emitirSessao({ ...JOAO });
-
-    expect(result.current.usuario).toEqual(JOAO);
-    expect(definirUsuarioSyncMock.mock.calls).toEqual([['user-123'], ['user-123']]);
-  });
-
-  it('não volta a "carregando" depois da primeira emissão', async () => {
-    const { result } = await renderHook(() => useAuth());
-
-    await emitirSessao(null);
-    await emitirSessao(JOAO);
-    await emitirSessao(null);
-
-    expect(result.current.carregandoSessao).toBe(false);
-  });
-
-  it('observa a sessão uma única vez, mesmo com novas renderizações', async () => {
+  it('re-renderizações não criam novas assinaturas', async () => {
     const { rerender } = await renderHook(() => useAuth());
 
     await rerender(undefined);
-    await emitirSessao(JOAO);
     await rerender(undefined);
 
-    expect(observarSessaoMock).toHaveBeenCalledTimes(1);
+    expect(observarSessao).toHaveBeenCalledTimes(1);
+    expect(cancelarObservacao).not.toHaveBeenCalled();
   });
 
-  it('cancela a observação ao desmontar', async () => {
+  it('cancela a observação da sessão ao desmontar', async () => {
     const { unmount } = await renderHook(() => useAuth());
-    expect(cancelarObservacao).not.toHaveBeenCalled();
 
     await unmount();
 

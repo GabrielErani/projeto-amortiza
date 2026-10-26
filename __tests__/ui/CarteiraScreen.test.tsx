@@ -1,345 +1,317 @@
-// Testes de src/screens/CarteiraScreen.tsx: visão macro de ganhos (semana, mês e seletor de semanas)
-// e gestão de dívidas (projeção anual, categorias, lista e exclusão).
-//
-// Semanas e totais vêm das funções reais de src/utils para uma data fixa: quarta-feira, 21/10/2026.
-// Outubro/2026 tem 5 semanas (Seg–Dom): 28/09–04/10, 05–11, 12–18, 19–25 (atual) e 26/10–01/11.
-
 import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react-native';
-import { CarteiraScreen, type CarteiraScreenProps } from '../../src/screens/CarteiraScreen';
-import { cores } from '../../src/theme';
-import type { DividaItem, RegistroGanhoLocal } from '../../src/types';
-import { calcularAmortizacaoPorFases } from '../../src/utils/amortizacao';
-import { gerarEstruturaSemana, gerarSemanasDoMes, somarGanhosDoMes } from '../../src/utils/datas';
+import { CarteiraScreen } from '../../src/screens/CarteiraScreen';
+import { ALVO_TOQUE, cores, textos } from '../../src/theme';
+import { DividaItem, RegistroGanhoLocal } from '../../src/types';
+import { gerarSemanasDoMes, somarGanhosDoMes } from '../../src/utils/datas';
 
-const HOJE = new Date(2026, 9, 21, 10, 0);
-const IDX_SEMANA_ATUAL = 3;
+type Props = React.ComponentProps<typeof CarteiraScreen>;
 
+// Mês fixo: hoje = 21/10/2026. Semanas (seg–dom) que tocam outubro: 28/09, 05/10, 12/10, 19/10 (atual) e 26/10.
+const HOJE = new Date(2026, 9, 21);
 function ganho(dataISO: string, valor: number): RegistroGanhoLocal {
-  return { dataISO, valor, metaDoDia: 100, percentual: 0, atualizadoEm: '2026-10-21T13:00:00.000Z' };
+  return { dataISO, valor, metaDoDia: 100, percentual: Math.min(100, valor), atualizadoEm: '2026-10-21T12:00:00.000Z' };
 }
-
-// 30/09 e 01/11 caem nas semanas de borda, mas não pertencem a outubro.
-const GANHOS: Record<string, RegistroGanhoLocal> = Object.fromEntries(
-  [
-    ganho('2026-09-30', 40),
-    ganho('2026-10-02', 60),
-    ganho('2026-10-06', 100),
-    ganho('2026-10-19', 250),
-    ganho('2026-10-22', 30),
-    ganho('2026-11-01', 70),
-  ].map((g) => [g.dataISO, g])
-);
-
-/** Totais da semana atual exatamente como o useDadosApp calcula. */
-function resumoDaSemanaAtual(ganhos: Record<string, RegistroGanhoLocal>) {
-  const estrutura = gerarEstruturaSemana(HOJE).map((d) =>
-    ganhos[d.dataISO] ? { ...d, valor: ganhos[d.dataISO].valor, temRegistro: true } : d
-  );
-  const dias = calcularAmortizacaoPorFases(estrutura, 100);
-  return {
-    totalSemana: dias.reduce((acc, d) => acc + d.valor, 0),
-    diasAmortizadosCompletos: dias.filter((d) => d.percentual === 100).length,
-  };
-}
+const GANHOS: Record<string, RegistroGanhoLocal> = {
+  '2026-10-06': ganho('2026-10-06', 200), // Sem 2
+  '2026-10-19': ganho('2026-10-19', 250), // Sem 4
+  '2026-10-21': ganho('2026-10-21', 150), // Sem 4
+};
+const SEMANAS = gerarSemanasDoMes(HOJE, GANHOS);
+const IDX_SEMANA_ATUAL = 3;
+// O formato dos rótulos é responsabilidade de gerarSemanasDoMes (suíte de utils); a tela só exibe o
+// rótulo recebido. Para as semanas que cruzam o mês usamos o rótulo gerado; nas demais, o texto literal.
+const ROTULO_SEM_1 = SEMANAS[0].rotulo; // 28/09 a 04/10
+const ROTULO_SEM_5 = SEMANAS[4].rotulo; // 26/10 a 01/11
 
 const DIVIDAS: DividaItem[] = [
-  { id: 'd1', descricao: 'Combustível', valor: 20, tipo: 'diaria', dataLancamento: '2026-10-01' },
-  { id: 'm1', descricao: 'Seguro', valor: 1500, tipo: 'mensal', dataLancamento: '2026-10-01' },
-  { id: 'i1', descricao: 'Pneu', valor: 690, tipo: 'imprevista', frequenciaImprevisto: 'anual', dataLancamento: '2026-10-02' },
-  { id: 'd2', descricao: 'Almoço', valor: 15, tipo: 'diaria', dataLancamento: '2026-10-03' },
-  { id: 'i2', descricao: 'Estacionamento', valor: 10, tipo: 'imprevista', frequenciaImprevisto: 'diaria', dataLancamento: '2026-10-04' },
-  { id: 'i3', descricao: 'Multa', valor: 120, tipo: 'imprevista', frequenciaImprevisto: 'mensal', dataLancamento: '2026-10-05' },
-  { id: 'i4', descricao: 'Guincho', valor: 300, tipo: 'imprevista', dataLancamento: '2026-10-06' },
+  { id: 'd1', descricao: 'Combustível', valor: 30, tipo: 'diaria', dataLancamento: '2026-10-01' },
+  { id: 'd2', descricao: 'Almoço', valor: 20, tipo: 'diaria', dataLancamento: '2026-10-01' },
+  { id: 'm1', descricao: 'Parcela do carro', valor: 800, tipo: 'mensal', dataLancamento: '2026-10-05' },
+  { id: 'm2', descricao: 'Seguro', valor: 150, tipo: 'mensal', dataLancamento: '2026-10-05' },
+  { id: 'i1', descricao: 'Pneu', valor: 450, tipo: 'imprevista', frequenciaImprevisto: 'anual', dataLancamento: '2026-10-10' },
+  { id: 'i2', descricao: 'Lavagem', valor: 50, tipo: 'imprevista', frequenciaImprevisto: 'mensal', dataLancamento: '2026-10-11' },
+  { id: 'i3', descricao: 'Estacionamento', valor: 5, tipo: 'imprevista', frequenciaImprevisto: 'diaria', dataLancamento: '2026-10-12' },
 ];
+const divida = (id: string) => DIVIDAS.find((d) => d.id === id)!;
 
-async function renderizar(props: Partial<CarteiraScreenProps> = {}) {
-  const callbacks = {
+async function renderizar(over: Partial<Props> = {}) {
+  const props: Props = {
+    totalSemana: 400,
+    diasCobertos: 3,
+    semanasMes: SEMANAS,
+    totalMes: SEMANAS.reduce((acc, sem) => acc + sem.totalGanhos, 0),
+    semanaSelecionadaIdx: IDX_SEMANA_ATUAL,
     onSelecionarSemana: jest.fn(),
-    onAdicionarDivida: jest.fn(),
+    dividas: DIVIDAS,
+    onNovaDivida: jest.fn(),
     onExcluirDivida: jest.fn(),
+    ...over,
   };
-  await render(
-    <CarteiraScreen
-      {...resumoDaSemanaAtual(GANHOS)}
-      semanasMes={gerarSemanasDoMes(HOJE, GANHOS)}
-      totalMes={somarGanhosDoMes(HOJE, GANHOS)}
-      semanaMesSelecionadaIdx={IDX_SEMANA_ATUAL}
-      dividas={DIVIDAS}
-      {...callbacks}
-      {...props}
-    />
-  );
-  return callbacks;
+  await render(<CarteiraScreen {...props} />);
+  return props;
 }
 
-/** A pílula da semana é o TouchableOpacity que envolve o nome. */
-const pilulaDaSemana = (nome: string) => screen.getByText(nome).parent;
+// Textos na ordem em que aparecem na tela (percurso em profundidade da árvore).
+function textosEmOrdem(): string[] {
+  return screen.container
+    .queryAll((el) => el.type === 'Text')
+    .map((el) => el.children.filter((c): c is string => typeof c === 'string').join(''));
+}
 
 describe('CarteiraScreen', () => {
-  it('pré-condição: os dados de outubro/2026 geram as 5 semanas esperadas', () => {
-    const semanas = gerarSemanasDoMes(HOJE, GANHOS);
+  it('separa as seções "Ganhos" e "Dívidas" com o rótulo em maiúsculas do tema', async () => {
+    await renderizar();
 
-    expect(semanas.map((s) => [s.rotulo, s.totalGanhos, s.isAtual])).toEqual([
-      ['Sem 1 (28 set – 4 out)', 100, false],
-      ['Sem 2 (5–11 out)', 100, false],
-      ['Sem 3 (12–18 out)', 0, false],
-      ['Sem 4 (19–25 out)', 280, true],
-      ['Sem 5 (26 out – 1 nov)', 70, false],
-    ]);
-    expect(somarGanhosDoMes(HOJE, GANHOS)).toBe(440);
-    expect(resumoDaSemanaAtual(GANHOS)).toEqual({ totalSemana: 280, diasAmortizadosCompletos: 2 });
+    expect(screen.getByText('Ganhos')).toHaveStyle(textos.rotuloMaiusculo);
+    expect(screen.getByText('Dívidas')).toHaveStyle(textos.rotuloMaiusculo);
+    expect(screen.queryByText('Dívidas e custos')).not.toBeOnTheScreen();
   });
 
-  describe('visão macro de ganhos', () => {
-    it('mostra o total da semana atual com as metas batidas e o total do mês', async () => {
+  describe('ganhos', () => {
+    it('mostra o total da semana atual e as metas batidas', async () => {
       await renderizar();
 
-      expect(screen.getByText('💼 Visão Macro de Ganhos')).toBeOnTheScreen();
-      expect(screen.getByText('SEMANA ATUAL')).toBeOnTheScreen();
-      expect(screen.getByText('2 de 7 metas batidas')).toBeOnTheScreen();
-      expect(screen.getByText('TOTAL DO MÊS')).toBeOnTheScreen();
-      expect(screen.getByText('Só os dias deste mês')).toBeOnTheScreen();
-      // Semana atual: card + pílula "Sem 4" + detalhe da semana selecionada
-      expect(screen.getAllByText('R$ 280.00')).toHaveLength(3);
+      expect(screen.getByText('Semana atual')).toBeOnTheScreen();
+      expect(screen.getByText('3/7 metas batidas')).toBeOnTheScreen();
+      // R$ 400,00 aparece no card da semana e no detalhe da semana selecionada (Sem 4).
+      expect(screen.getAllByText('R$ 400,00')).toHaveLength(2);
     });
 
-    it('o total do mês considera só os dias de outubro (somarGanhosDoMes), não as semanas de borda', async () => {
+    it('mostra o total do mês (soma das semanas) e a quantidade de semanas', async () => {
       await renderizar();
 
-      // 60 + 100 + 250 + 30; a soma das pílulas daria 550 (inclui 30/09 e 01/11)
-      expect(screen.getByText('R$ 440.00')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 440.00')).toHaveStyle({ color: cores.info });
-      expect(screen.queryByText('R$ 550.00')).not.toBeOnTheScreen();
+      expect(screen.getByText('Mês')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 600,00')).toBeOnTheScreen();
+      expect(screen.getByText('5 semanas')).toBeOnTheScreen();
     });
 
-    it('lista todas as semanas do mês com o total de cada uma e a estrela na semana atual', async () => {
+    it('lista as semanas do mês com o total curto e marca a atual', async () => {
       await renderizar();
 
-      expect(screen.getByText('Navegar nas Semanas do Mês:')).toBeOnTheScreen();
-      expect(screen.getByText('Sem 1 (28 set – 4 out)')).toBeOnTheScreen();
+      expect(SEMANAS).toHaveLength(5);
+      expect(screen.getByText(ROTULO_SEM_1)).toBeOnTheScreen();
       expect(screen.getByText('Sem 2 (5–11 out)')).toBeOnTheScreen();
       expect(screen.getByText('Sem 3 (12–18 out)')).toBeOnTheScreen();
-      expect(screen.getByText('Sem 4 (19–25 out) ★')).toBeOnTheScreen();
-      expect(screen.getByText('Sem 5 (26 out – 1 nov)')).toBeOnTheScreen();
-      expect(screen.getAllByText('R$ 100.00')).toHaveLength(2); // Sem 1 e Sem 2
-      expect(screen.getByText('R$ 0.00')).toBeOnTheScreen(); // Sem 3
-      expect(screen.getByText('R$ 70.00')).toBeOnTheScreen(); // Sem 5
-      expect(screen.getAllByText(/★/)).toHaveLength(1);
+      expect(screen.getByText('Sem 4 (19–25 out)')).toBeOnTheScreen();
+      expect(screen.getByText(ROTULO_SEM_5)).toBeOnTheScreen();
+      expect(screen.getByText('R$ 200')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 400')).toBeOnTheScreen();
+      expect(screen.getAllByText('R$ 0')).toHaveLength(3);
+      // A semana atual é anunciada no nome acessível e ganha o ponto de destaque (como o dia de hoje).
+      const atual = screen.getByRole('button', { name: 'Sem 4 (19–25 out), R$ 400,00, semana atual' });
+      expect(atual.children).toHaveLength(3);
+      expect(screen.getByRole('button', { name: 'Sem 2 (5–11 out), R$ 200,00' }).children).toHaveLength(2);
+      expect(screen.getAllByRole('button', { name: /semana atual$/ })).toHaveLength(1);
     });
 
-    it('detalha a semana selecionada', async () => {
-      await renderizar({ semanaMesSelecionadaIdx: IDX_SEMANA_ATUAL });
+    it('as pílulas de semana são botões com estado de seleção', async () => {
+      await renderizar({ semanaSelecionadaIdx: 1 });
 
-      expect(screen.getByText('Detalhe da Sem 4 (19–25 out):')).toBeOnTheScreen();
-      expect(screen.getByText('Total arrecadado: R$ 280.00')).toBeOnTheScreen();
+      expect(screen.getByRole('button', { name: 'Sem 2 (5–11 out), R$ 200,00' })).toBeSelected();
+      expect(screen.getByRole('button', { name: /^Sem 4/ })).not.toBeSelected();
+      expect(screen.getAllByRole('button', { selected: true })).toHaveLength(1);
+      expect(screen.getByRole('button', { name: 'Sem 2 (5–11 out), R$ 200,00' })).toHaveStyle({ backgroundColor: cores.primaria });
     });
 
-    it('detalha outra semana quando ela é a selecionada', async () => {
-      await renderizar({ semanaMesSelecionadaIdx: 0 });
+    it('mostra o detalhe da semana selecionada', async () => {
+      await renderizar({ semanaSelecionadaIdx: 1 });
 
-      expect(screen.getByText('Detalhe da Sem 1 (28 set – 4 out):')).toBeOnTheScreen();
-      expect(screen.getByText('Total arrecadado: R$ 100.00')).toBeOnTheScreen();
+      expect(screen.getByText('Sem 2 (5–11 out): R$ 200,00')).toBeOnTheScreen();
     });
 
-    it('com índice fora do mês, detalha a primeira semana', async () => {
-      await renderizar({ semanaMesSelecionadaIdx: 12 });
+    it('tocar numa semana chama onSelecionarSemana com o índice', async () => {
+      const props = await renderizar();
 
-      expect(screen.getByText('Detalhe da Sem 1 (28 set – 4 out):')).toBeOnTheScreen();
+      await fireEvent.press(screen.getByText('Sem 2 (5–11 out)'));
+      expect(props.onSelecionarSemana).toHaveBeenLastCalledWith(1);
+
+      await fireEvent.press(screen.getByText('R$ 200'));
+      expect(props.onSelecionarSemana).toHaveBeenLastCalledWith(1);
+
+      await fireEvent.press(screen.getByText(ROTULO_SEM_5));
+      expect(props.onSelecionarSemana).toHaveBeenLastCalledWith(4);
     });
 
-    it('destaca somente a pílula da semana selecionada', async () => {
-      await renderizar({ semanaMesSelecionadaIdx: 1 });
+    it('índice de semana inválido cai na primeira semana', async () => {
+      await renderizar({ semanaSelecionadaIdx: 42 });
 
-      expect(pilulaDaSemana('Sem 2 (5–11 out)')).toHaveStyle({
-        borderColor: cores.primaria,
-        backgroundColor: cores.superficieAlta,
+      expect(screen.getByText(`${ROTULO_SEM_1}: R$ 0,00`)).toBeOnTheScreen();
+    });
+
+    it('sem semanas: mês zerado e sem detalhe', async () => {
+      await renderizar({ semanasMes: [], totalMes: 0, totalSemana: 0, diasCobertos: 0 });
+
+      expect(screen.getByText('0 semanas')).toBeOnTheScreen();
+      expect(screen.getByText('0/7 metas batidas')).toBeOnTheScreen();
+      expect(screen.getAllByText('R$ 0,00')).toHaveLength(2);
+      expect(screen.queryByText(/^Sem \d/)).not.toBeOnTheScreen();
+    });
+
+    // BUG documentado (ver relatório): gerarSemanasDoMes soma os 7 dias de cada semana, inclusive os de
+    // setembro/novembro nas semanas das bordas, e o card "Mês" soma essas semanas.
+    it('o total do mês não inclui ganhos de dias de outros meses', async () => {
+      const semanas = gerarSemanasDoMes(HOJE, {
+        '2026-09-30': ganho('2026-09-30', 50), // setembro, mas cai na "Sem 1" de outubro
+        '2026-11-01': ganho('2026-11-01', 70), // novembro, mas cai na "Sem 5" de outubro
       });
-      expect(screen.getByText('Sem 2 (5–11 out)')).toHaveStyle({ color: '#FFFFFF', fontWeight: '700' });
-      expect(pilulaDaSemana('Sem 4 (19–25 out) ★')).toHaveStyle({
-        borderColor: cores.superficieAlta,
-        backgroundColor: '#131C2E',
-      });
-    });
+      // O App calcula o total do mês com somarGanhosDoMes (só dias de outubro) e passa pronto para a tela.
+      await renderizar({ semanasMes: semanas, totalMes: somarGanhosDoMes(HOJE, {
+        '2026-09-30': ganho('2026-09-30', 50),
+        '2026-11-01': ganho('2026-11-01', 70),
+      }), totalSemana: 0, diasCobertos: 0 });
 
-    it.each([
-      ['Sem 1 (28 set – 4 out)', 0],
-      ['Sem 3 (12–18 out)', 2],
-      ['Sem 4 (19–25 out) ★', 3],
-      ['Sem 5 (26 out – 1 nov)', 4],
-    ])('tocar em "%s" seleciona a semana %i', async (nome, indice) => {
-      const { onSelecionarSemana } = await renderizar();
-
-      await fireEvent.press(screen.getByText(nome));
-
-      expect(onSelecionarSemana).toHaveBeenCalledTimes(1);
-      expect(onSelecionarSemana).toHaveBeenCalledWith(indice);
-    });
-
-    it('sem ganhos, mostra tudo zerado', async () => {
-      await renderizar({
-        totalSemana: 0,
-        diasAmortizadosCompletos: 0,
-        semanasMes: gerarSemanasDoMes(HOJE, {}),
-        totalMes: 0,
-        dividas: [],
-      });
-
-      expect(screen.getByText('0 de 7 metas batidas')).toBeOnTheScreen();
-      expect(screen.getByText('Total arrecadado: R$ 0.00')).toBeOnTheScreen();
-      // card da semana + card do mês + 5 pílulas + detalhe
-      expect(screen.getAllByText('R$ 0.00')).toHaveLength(8);
+      // Nenhum ganho em outubro → o card "Mês" mostra R$ 0,00, e não a soma das semanas (R$ 120,00).
+      expect(screen.queryByText('R$ 120,00')).not.toBeOnTheScreen();
+      expect(screen.getAllByText('R$ 0,00').length).toBeGreaterThanOrEqual(1);
     });
   });
 
-  describe('gestão de dívidas', () => {
-    it('projeta a dívida anual (diárias x365, mensais x12 e imprevistos anualizados)', async () => {
+  describe('dívidas e custos', () => {
+    it('mostra a projeção anual total e o detalhamento por tipo', async () => {
       await renderizar();
 
-      expect(screen.getByText('📉 Gestão de Dívidas & Custos')).toBeOnTheScreen();
-      expect(screen.getByText('⚡ Dívida Anual Projetada')).toBeOnTheScreen();
-      expect(screen.getByText('Automático 365 dias')).toBeOnTheScreen();
-      // (20 + 15) x 365 + 1500 x 12 + (690 + 10 x 365 + 120 x 12 + 300)
-      expect(screen.getByText('R$ 36.855,00')).toBeOnTheScreen();
-      expect(
-        screen.getByText('Calculada com base nas suas dívidas diárias (x365), mensais (x12) e imprevistos acumulados.')
-      ).toBeOnTheScreen();
+      expect(screen.getByText('Projeção anual')).toBeOnTheScreen();
+      // (30+20)×365 + (800+150)×12 + (450 + 50×12 + 5×365) = 18.250 + 11.400 + 2.875
+      expect(screen.getByText('R$ 32.525,00')).toBeOnTheScreen();
+      expect(screen.getByText('Diárias ×365')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 18.250')).toBeOnTheScreen();
+      expect(screen.getByText('Mensais ×12')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 11.400')).toBeOnTheScreen();
+      // "Imprevistos" é rótulo do detalhamento e também título da seção.
+      expect(screen.getAllByText('Imprevistos')).toHaveLength(2);
+      expect(screen.getByText('R$ 2.875')).toBeOnTheScreen();
     });
 
-    it('detalha a projeção por categoria', async () => {
+    it('mostra os totais diário, mensal e anual (imprevistos) de cada seção', async () => {
       await renderizar();
 
-      expect(screen.getByText('Diárias/Ano')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 12775')).toBeOnTheScreen();
-      expect(screen.getByText('Mensais/Ano')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 18000')).toBeOnTheScreen();
-      expect(screen.getByText('Imprevistos')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 6080')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 50,00/dia')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 950,00/mês')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 2.875,00/ano')).toBeOnTheScreen();
     });
 
-    it('mostra o total de cada categoria', async () => {
+    it('lista cada dívida dentro da seção do seu tipo', async () => {
       await renderizar();
 
-      expect(screen.getByText('☀️ Dívidas Diárias (Gasto Diário)')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 35.00 / dia')).toBeOnTheScreen();
-      expect(screen.getByText('📅 Dívidas Mensais (Custos Fixos)')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 1500.00 / mês')).toBeOnTheScreen();
-      expect(screen.getByText('🚨 Dívidas Imprevistas')).toBeOnTheScreen();
-      expect(screen.getByText('Impacto anual: R$ 6080.00')).toBeOnTheScreen();
+      const textos = textosEmOrdem();
+      const pos = (t: string) => {
+        const i = textos.indexOf(t);
+        expect(i).toBeGreaterThanOrEqual(0);
+        return i;
+      };
+      const [diarias, mensais, imprevistos] = [pos('Gastos diários'), pos('Dívidas mensais'), textos.lastIndexOf('Imprevistos')];
+      for (const item of ['Combustível', 'Almoço']) {
+        expect(pos(item)).toBeGreaterThan(diarias);
+        expect(pos(item)).toBeLessThan(mensais);
+      }
+      for (const item of ['Parcela do carro', 'Seguro']) {
+        expect(pos(item)).toBeGreaterThan(mensais);
+        expect(pos(item)).toBeLessThan(imprevistos);
+      }
+      for (const item of ['Pneu', 'Lavagem', 'Estacionamento']) {
+        expect(pos(item)).toBeGreaterThan(imprevistos);
+      }
     });
 
-    it('lista as dívidas diárias com o impacto anual', async () => {
+    it('cada item mostra valor com o sufixo do tipo e a projeção anual', async () => {
       await renderizar();
 
-      expect(screen.getByText('Combustível')).toBeOnTheScreen();
-      expect(screen.getByText('Impacto: R$ 7300.00/ano')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 20.00/dia')).toBeOnTheScreen();
-      expect(screen.getByText('Almoço')).toBeOnTheScreen();
-      expect(screen.getByText('Impacto: R$ 5475.00/ano')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 15.00/dia')).toBeOnTheScreen();
+      // Diárias: valor/dia e ×365 por ano
+      expect(screen.getByText('R$ 30,00/dia')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 10.950/ano')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 20,00/dia')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 7.300/ano')).toBeOnTheScreen();
+      // Mensais: valor/mês e ×12 por ano
+      expect(screen.getByText('R$ 800,00/mês')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 9.600/ano')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 150,00/mês')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 1.800/ano')).toBeOnTheScreen();
+      // Imprevistos: frequência + projeção; valor sem sufixo
+      expect(screen.getByText('Anual / Pontual · R$ 450/ano')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 450,00')).toBeOnTheScreen();
+      expect(screen.getByText('Mensal · R$ 600/ano')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 50,00')).toBeOnTheScreen();
+      expect(screen.getByText('Diária · R$ 1.825/ano')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 5,00')).toBeOnTheScreen();
     });
 
-    it('lista as dívidas mensais com o impacto anual', async () => {
-      await renderizar();
+    it('imprevisto sem frequência é tratado como anual/pontual', async () => {
+      await renderizar({
+        dividas: [{ id: 'x', descricao: 'Multa', valor: 195.23, tipo: 'imprevista', dataLancamento: '2026-10-02' }],
+      });
 
-      expect(screen.getByText('Seguro')).toBeOnTheScreen();
-      expect(screen.getByText('Impacto: R$ 18000.00/ano')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 1500.00/mês')).toBeOnTheScreen();
+      expect(screen.getByText('Anual / Pontual · R$ 195/ano')).toBeOnTheScreen();
+      // Valor do item e projeção anual total coincidem (único item, frequência anual).
+      expect(screen.getAllByText('R$ 195,23')).toHaveLength(2);
+      expect(screen.getByText('R$ 195,23/ano')).toBeOnTheScreen();
     });
 
-    it('lista os imprevistos com a frequência e o valor em vermelho', async () => {
-      await renderizar();
+    it('os botões "+ Adicionar" de cada seção chamam onNovaDivida com o tipo', async () => {
+      const props = await renderizar();
 
-      expect(screen.getByText('Pneu')).toBeOnTheScreen();
-      expect(screen.getByText('Estacionamento')).toBeOnTheScreen();
-      expect(screen.getByText('Multa')).toBeOnTheScreen();
-      expect(screen.getByText('Guincho')).toBeOnTheScreen();
-      expect(screen.getByText('Frequência: Diária')).toBeOnTheScreen();
-      expect(screen.getByText('Frequência: Mensal')).toBeOnTheScreen();
-      // "anual" e frequência ausente usam o mesmo rótulo
-      expect(screen.getAllByText('Frequência: Anual / Pontual')).toHaveLength(2);
-      expect(screen.getByText('R$ 690.00')).toHaveStyle({ color: cores.erro });
-      expect(screen.getByText('R$ 10.00')).toHaveStyle({ color: cores.erro });
-    });
-
-    it('não mostra as mensagens de categoria vazia quando há dívidas', async () => {
-      await renderizar();
-
-      expect(screen.queryByText(/^Nenhum/)).not.toBeOnTheScreen();
-    });
-
-    it('mostra as mensagens de categoria vazia e totais zerados sem dívidas', async () => {
-      await renderizar({ dividas: [] });
-
-      expect(screen.getByText('Nenhum gasto diário registrado (ex: combustível, almoço).')).toBeOnTheScreen();
-      expect(
-        screen.getByText('Nenhuma dívida mensal registrada (ex: aluguel carro, seguro, parcela).')
-      ).toBeOnTheScreen();
-      expect(screen.getByText('Nenhum imprevisto registrado (ex: manutenção inesperada, multa).')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 0,00')).toBeOnTheScreen();
-      expect(screen.getAllByText('R$ 0')).toHaveLength(3);
-      expect(screen.getByText('R$ 0.00 / dia')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 0.00 / mês')).toBeOnTheScreen();
-      expect(screen.getByText('Impacto anual: R$ 0.00')).toBeOnTheScreen();
-      expect(screen.queryByText('✕')).not.toBeOnTheScreen();
-    });
-
-    it('mostra a mensagem de vazio só nas categorias sem itens', async () => {
-      await renderizar({ dividas: DIVIDAS.filter((d) => d.tipo === 'mensal') });
-
-      expect(screen.getByText('Nenhum gasto diário registrado (ex: combustível, almoço).')).toBeOnTheScreen();
-      expect(screen.queryByText(/^Nenhuma dívida mensal/)).not.toBeOnTheScreen();
-      expect(screen.getByText('Nenhum imprevisto registrado (ex: manutenção inesperada, multa).')).toBeOnTheScreen();
-      expect(screen.getByText('R$ 18.000,00')).toBeOnTheScreen();
-    });
-
-    it('"+ Adicionar" de cada categoria e "+ Lançar" pedem o tipo correto', async () => {
-      const { onAdicionarDivida } = await renderizar();
-
-      const [adicionarDiaria, adicionarMensal] = screen.getAllByText('+ Adicionar');
-      await fireEvent.press(adicionarDiaria);
-      await fireEvent.press(adicionarMensal);
-      await fireEvent.press(screen.getByText('+ Lançar'));
-
-      expect(onAdicionarDivida.mock.calls).toEqual([['diaria'], ['mensal'], ['imprevista']]);
-    });
-
-    it('"✕" pede a exclusão com o id e a descrição da dívida (agrupadas por categoria)', async () => {
-      const { onExcluirDivida } = await renderizar();
-
-      const botoes = screen.getAllByText('✕');
-      expect(botoes).toHaveLength(DIVIDAS.length);
+      const botoes = screen.getAllByRole('button', { name: '+ Adicionar' });
+      expect(botoes).toHaveLength(3);
       for (const botao of botoes) {
         await fireEvent.press(botao);
       }
 
-      expect(onExcluirDivida.mock.calls).toEqual([
-        ['d1', 'Combustível'],
-        ['d2', 'Almoço'],
-        ['m1', 'Seguro'],
-        ['i1', 'Pneu'],
-        ['i2', 'Estacionamento'],
-        ['i3', 'Multa'],
-        ['i4', 'Guincho'],
-      ]);
+      expect(jest.mocked(props.onNovaDivida).mock.calls).toEqual([['diaria'], ['mensal'], ['imprevista']]);
     });
 
-    it('recalcula a projeção quando a lista de dívidas muda', async () => {
-      const callbacks = { onSelecionarSemana: jest.fn(), onAdicionarDivida: jest.fn(), onExcluirDivida: jest.fn() };
-      const props = {
-        ...resumoDaSemanaAtual(GANHOS),
-        semanasMes: gerarSemanasDoMes(HOJE, GANHOS),
-        totalMes: somarGanhosDoMes(HOJE, GANHOS),
-        semanaMesSelecionadaIdx: IDX_SEMANA_ATUAL,
-        ...callbacks,
-      };
-      await render(<CarteiraScreen {...props} dividas={DIVIDAS} />);
-      expect(screen.getByText('R$ 36.855,00')).toBeOnTheScreen();
+    it('excluir chama onExcluirDivida com o item correspondente', async () => {
+      const props = await renderizar();
 
-      await screen.rerender(<CarteiraScreen {...props} dividas={DIVIDAS.filter((d) => d.id !== 'm1')} />);
+      await fireEvent.press(screen.getByLabelText('Excluir Parcela do carro'));
+      await fireEvent.press(screen.getByLabelText('Excluir Estacionamento'));
 
-      expect(screen.getByText('R$ 18.855,00')).toBeOnTheScreen();
-      expect(screen.queryByText('Seguro')).not.toBeOnTheScreen();
+      expect(jest.mocked(props.onExcluirDivida).mock.calls).toEqual([[divida('m1')], [divida('i3')]]);
+    });
+
+    it('os botões "✕" têm papel de botão e alvo de toque de 44', async () => {
+      await renderizar();
+
+      const excluir = screen.getByRole('button', { name: 'Excluir Combustível' });
+      expect(excluir).toHaveTextContent('✕');
+      expect(excluir).toHaveStyle({ width: ALVO_TOQUE, height: ALVO_TOQUE });
+      expect(screen.getAllByRole('button', { name: /^Excluir / })).toHaveLength(DIVIDAS.length);
+    });
+
+    it('"+ Adicionar" tem alvo de toque mínimo e o tom primário suave', async () => {
+      await renderizar();
+
+      for (const botao of screen.getAllByRole('button', { name: '+ Adicionar' })) {
+        expect(botao).toHaveStyle({ minHeight: ALVO_TOQUE, backgroundColor: cores.primariaSuave });
+      }
+    });
+
+    it('a projeção anual fica em destaque na cor de erro e os imprevistos também', async () => {
+      await renderizar();
+
+      expect(screen.getByText('R$ 32.525,00')).toHaveStyle({ color: cores.erro });
+      expect(screen.getByText('R$ 450,00')).toHaveStyle({ color: cores.erro });
+      expect(screen.getByText('R$ 30,00/dia')).toHaveStyle({ color: cores.texto });
+    });
+
+    it('sem dívidas: mostra os exemplos de cada seção e totais zerados', async () => {
+      await renderizar({ dividas: [] });
+
+      expect(screen.getByText('Ex.: combustível, almoço.')).toBeOnTheScreen();
+      expect(screen.getByText('Ex.: parcela, seguro, plano.')).toBeOnTheScreen();
+      expect(screen.getByText('Ex.: manutenção, multa.')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 0,00/dia')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 0,00/mês')).toBeOnTheScreen();
+      expect(screen.getByText('R$ 0,00/ano')).toBeOnTheScreen();
+      expect(screen.queryByLabelText(/^Excluir /)).not.toBeOnTheScreen();
+      expect(screen.getAllByRole('button', { name: '+ Adicionar' })).toHaveLength(3);
+    });
+
+    it('seção com itens esconde o exemplo; seções vazias continuam mostrando', async () => {
+      await renderizar({ dividas: [divida('m1')] });
+
+      expect(screen.queryByText('Ex.: parcela, seguro, plano.')).not.toBeOnTheScreen();
+      expect(screen.getByText('Ex.: combustível, almoço.')).toBeOnTheScreen();
+      expect(screen.getByText('Ex.: manutenção, multa.')).toBeOnTheScreen();
     });
   });
 });

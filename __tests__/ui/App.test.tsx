@@ -1,758 +1,604 @@
-// Teste de integração leve do App.tsx: portão de autenticação (splash → AuthScreen → app),
-// modo "sem conta", seção Conta do drawer (entrar / sair), troca de abas, lançamento de ganho
-// pelo fluxo completo, meta, dívidas, histórico e atualização.
-//
-// Mocks: auth (observarSessao guarda o callback para o teste emitir a sessão), sync (observável simples),
-// storage ("banco" em memória), OCR e expo-image-picker. A flag do modo sem conta usa o mock oficial
-// do AsyncStorage. Relógio fixo em quarta-feira, 21/10/2026 10:00.
-
+// Integração leve do App: gate de sessão (splash → AuthScreen / app principal) e alguns fluxos.
 import React from 'react';
-import { Alert, type AlertButton } from 'react-native';
+import { Alert, AlertButton } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { act, fireEvent, render, screen, within } from '@testing-library/react-native';
 import App from '../../App';
-import { CHAVE_MODO_OFFLINE } from '../../src/hooks/useModoOffline';
-import { cadastrar, entrar, observarSessao, recuperarSenha, sair } from '../../src/services/auth';
-import * as storage from '../../src/services/storage';
-import { definirUsuarioSync, observarEstadoSync, obterEstadoSync, sincronizarTudo } from '../../src/services/sync';
-import type { DividaItem, EstadoSync, RegistroGanhoLocal, ResultadoServico, Usuario } from '../../src/types';
+import { observarSessao, sair } from '../../src/services/auth';
+import { definirUsuarioSync, obterEstadoSync, observarEstadoSync, sincronizarTudo } from '../../src/services/sync';
+import {
+  carregarDividasLocais,
+  carregarGanhosLocais,
+  carregarMetaBaseLocal,
+  limparDadosLocais,
+  removerDividaLocal,
+  salvarDividaLocal,
+  salvarGanhoLocalmente,
+  salvarMetaBaseLocal,
+} from '../../src/services/storage';
+import { processarOCRLocal } from '../../src/services/ocr';
+import { DividaItem, EstadoSync, RegistroGanhoLocal, Usuario } from '../../src/types';
 
-jest.mock('react-native-safe-area-context', () => require('react-native-safe-area-context/jest/mock').default);
-
+// Sem insets nativos o SafeAreaProvider real não renderiza os filhos; usamos o mock oficial da lib.
+jest.mock('react-native-safe-area-context', () => jest.requireActual('react-native-safe-area-context/jest/mock').default);
 jest.mock('../../src/services/auth', () => ({
   observarSessao: jest.fn(),
+  sair: jest.fn(),
   entrar: jest.fn(),
   cadastrar: jest.fn(),
   recuperarSenha: jest.fn(),
-  sair: jest.fn(),
 }));
-
 jest.mock('../../src/services/sync', () => ({
-  observarEstadoSync: jest.fn(),
-  obterEstadoSync: jest.fn(),
-  sincronizarTudo: jest.fn(),
   definirUsuarioSync: jest.fn(),
+  sincronizarTudo: jest.fn(),
+  obterEstadoSync: jest.fn(),
+  observarEstadoSync: jest.fn(),
   agendarSync: jest.fn(),
 }));
-
 jest.mock('../../src/services/storage', () => ({
-  carregarGanhosLocais: jest.fn(),
-  salvarGanhoLocalmente: jest.fn(),
-  carregarMetaBaseLocal: jest.fn(),
-  salvarMetaBaseLocal: jest.fn(),
   carregarDividasLocais: jest.fn(),
-  salvarDividaLocal: jest.fn(),
-  removerDividaLocal: jest.fn(),
+  carregarGanhosLocais: jest.fn(),
+  carregarMetaBaseLocal: jest.fn(),
   limparDadosLocais: jest.fn(),
+  removerDividaLocal: jest.fn(),
+  salvarDividaLocal: jest.fn(),
+  salvarGanhoLocalmente: jest.fn(),
+  salvarMetaBaseLocal: jest.fn(),
 }));
-
 jest.mock('../../src/services/ocr', () => ({ processarOCRLocal: jest.fn() }));
-
 jest.mock('expo-image-picker', () => ({
   requestMediaLibraryPermissionsAsync: jest.fn(),
   launchImageLibraryAsync: jest.fn(),
 }));
 
-const observarSessaoMock = jest.mocked(observarSessao);
-const entrarMock = jest.mocked(entrar);
-const cadastrarMock = jest.mocked(cadastrar);
-const recuperarSenhaMock = jest.mocked(recuperarSenha);
-const sairMock = jest.mocked(sair);
-const storageMock = jest.mocked(storage);
-const obterEstadoSyncMock = jest.mocked(obterEstadoSync);
-const observarEstadoSyncMock = jest.mocked(observarEstadoSync);
-const sincronizarTudoMock = jest.mocked(sincronizarTudo);
-const definirUsuarioSyncMock = jest.mocked(definirUsuarioSync);
-const asyncStorageMock = jest.mocked(AsyncStorage);
-
-// ─── Constantes ───────────────────────────────────────────────────────────────
-
-const HOJE = new Date(2026, 9, 21, 10, 0); // quarta-feira
-const USUARIO: Usuario = { id: 'user-123', email: 'joao@exemplo.com', nome: 'João' };
+const CHAVE_MODO_OFFLINE = '@amortiza_modo_offline_v1';
+// Quarta-feira, 21/10/2026 → semana de 19 a 25 de outubro.
+const AGORA = new Date(2026, 9, 21, 10, 0);
+const GABRIEL: Usuario = { id: 'u1', email: 'gabriel@exemplo.com', nome: 'Gabriel' };
 const SEM_CONTA: EstadoSync = { status: 'sem_conta', mensagem: 'Entre para sincronizar na nuvem.' };
-const SYNC_OK: ResultadoServico<{ enviados: number; recebidos: number }> = {
-  success: true,
-  data: { enviados: 0, recebidos: 0 },
+const COMBUSTIVEL: DividaItem = { id: 'd1', descricao: 'Combustível', valor: 30, tipo: 'diaria', dataLancamento: '2026-10-01' };
+
+type Permissao = Awaited<ReturnType<typeof ImagePicker.requestMediaLibraryPermissionsAsync>>;
+type ResultadoPicker = Awaited<ReturnType<typeof ImagePicker.launchImageLibraryAsync>>;
+const PERMISSAO_CONCEDIDA = { granted: true, status: 'granted', canAskAgain: true, expires: 'never' } as Permissao;
+const PERMISSAO_NEGADA = { granted: false, status: 'denied', canAskAgain: true, expires: 'never' } as Permissao;
+const PRINT_ESCOLHIDO = { canceled: false, assets: [{ uri: 'file:///print.png', width: 1080, height: 1920 }] } as ResultadoPicker;
+
+function registro(dataISO: string, valor: number): RegistroGanhoLocal {
+  return { dataISO, valor, metaDoDia: 100, percentual: Math.min(100, valor), atualizadoEm: '2026-10-20T12:00:00.000Z' };
+}
+
+let emitirSessao: (u: Usuario | null) => void = () => {
+  throw new Error('observarSessao ainda não foi assinado');
 };
+const cancelarSessao = jest.fn();
 
-const TITULO_SEMANA = 'Amortiza • Semana';
-const TITULO_CARTEIRA = 'Amortiza • Carteira';
-const CONTINUAR_SEM_CONTA = 'Continuar sem conta';
-const ITEM_SAIR = '🚪 Sair da conta';
-const ITEM_ENTRAR = '🔐 Entrar ou criar conta';
-
-const FUNCOES_STORAGE = [
-  'carregarGanhosLocais',
-  'salvarGanhoLocalmente',
-  'carregarMetaBaseLocal',
-  'salvarMetaBaseLocal',
-  'carregarDividasLocais',
-  'salvarDividaLocal',
-  'removerDividaLocal',
-  'limparDadosLocais',
-] as const;
-
-const getItemOriginal = asyncStorageMock.getItem.getMockImplementation();
-
-function adiado<T>() {
-  let resolver!: (valor: T) => void;
-  const promessa = new Promise<T>((resolve) => {
-    resolver = resolve;
-  });
-  return { promessa, resolver };
-}
-
-function ganho(dataISO: string, valor: number, extra: Partial<RegistroGanhoLocal> = {}): RegistroGanhoLocal {
-  return {
-    dataISO,
-    valor,
-    metaDoDia: 100,
-    percentual: Math.min(100, valor),
-    atualizadoEm: '2026-10-20T12:00:00.000Z',
-    ...extra,
-  };
-}
-
-// ─── Estado dos mocks ─────────────────────────────────────────────────────────
-
-let callbackSessao: ((usuario: Usuario | null) => void) | null;
-let bancoGanhos: Record<string, RegistroGanhoLocal>;
-let bancoMeta: number | null;
-let bancoDividas: DividaItem[];
-let estadoSyncAtual: EstadoSync;
-let observadoresSync: Array<(e: EstadoSync) => void>;
-let alerta: jest.SpyInstance;
-
-beforeEach(async () => {
-  jest.useFakeTimers({ now: HOJE, advanceTimers: true });
-  alerta = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
-  await AsyncStorage.clear();
-  asyncStorageMock.getItem.mockClear();
-  asyncStorageMock.setItem.mockClear();
-  asyncStorageMock.removeItem.mockClear();
-
-  callbackSessao = null;
-  observarSessaoMock.mockReset().mockImplementation((cb) => {
-    callbackSessao = cb;
-    return () => {
-      callbackSessao = null;
-    };
-  });
-  entrarMock.mockReset().mockResolvedValue({ success: true, data: USUARIO });
-  cadastrarMock.mockReset().mockResolvedValue({ success: true, data: { precisaConfirmarEmail: false } });
-  recuperarSenhaMock.mockReset().mockResolvedValue({ success: true, data: undefined });
-  // Como o Supabase: sair() encerra a sessão e o observador recebe null
-  sairMock.mockReset().mockImplementation(async () => {
-    callbackSessao?.(null);
-  });
-
-  bancoGanhos = {};
-  bancoMeta = null;
-  bancoDividas = [];
-  FUNCOES_STORAGE.forEach((nome) => storageMock[nome].mockReset());
-  storageMock.carregarGanhosLocais.mockImplementation(async () => bancoGanhos);
-  storageMock.salvarGanhoLocalmente.mockImplementation(async (registro) => {
-    bancoGanhos[registro.dataISO] = registro;
-  });
-  storageMock.carregarMetaBaseLocal.mockImplementation(async (padrao) => bancoMeta ?? padrao ?? 100);
-  storageMock.salvarMetaBaseLocal.mockImplementation(async (meta) => {
-    bancoMeta = meta;
-  });
-  storageMock.carregarDividasLocais.mockImplementation(async () => [...bancoDividas]);
-  storageMock.salvarDividaLocal.mockImplementation(async (nova) => {
-    bancoDividas = [...bancoDividas.filter((d) => d.id !== nova.id), nova];
-    return [...bancoDividas];
-  });
-  storageMock.removerDividaLocal.mockImplementation(async (id) => {
-    bancoDividas = bancoDividas.filter((d) => d.id !== id);
-    return [...bancoDividas];
-  });
-  storageMock.limparDadosLocais.mockImplementation(async () => {
-    bancoGanhos = {};
-    bancoMeta = null;
-    bancoDividas = [];
-  });
-
-  estadoSyncAtual = SEM_CONTA;
-  observadoresSync = [];
-  obterEstadoSyncMock.mockReset().mockImplementation(() => estadoSyncAtual);
-  observarEstadoSyncMock.mockReset().mockImplementation((cb) => {
-    observadoresSync.push(cb);
-    cb(estadoSyncAtual);
-    return () => {
-      observadoresSync = observadoresSync.filter((o) => o !== cb);
-    };
-  });
-  sincronizarTudoMock.mockReset().mockResolvedValue(SYNC_OK);
-  definirUsuarioSyncMock.mockReset();
-});
-
-afterEach(() => {
-  // Descarta um getItem "Once" não consumido e volta ao comportamento do mock oficial
-  asyncStorageMock.getItem.mockReset().mockImplementation(getItemOriginal!);
-  alerta.mockRestore();
-  jest.useRealTimers();
-});
-
-// ─── Auxiliares ───────────────────────────────────────────────────────────────
-
-/** Simula o Supabase Auth informando a sessão (inicial, login, logout ou expiração). */
-async function emitirSessao(usuario: Usuario | null) {
+async function emitir(usuario: Usuario | null) {
   await act(async () => {
-    callbackSessao?.(usuario);
+    emitirSessao(usuario);
   });
 }
 
-async function emitirSync(estado: EstadoSync) {
-  await act(async () => {
-    estadoSyncAtual = estado;
-    observadoresSync.forEach((cb) => cb(estado));
-  });
-}
+// getItem do mock oficial do AsyncStorage já é um jest.fn: jest.spyOn devolveria o próprio mock (sem como
+// restaurar). Guardamos a implementação real para recolocá-la depois de cada teste.
+const getItemReal = jest.mocked(AsyncStorage.getItem).getMockImplementation()!;
 
-async function abrirSemSessao() {
-  await render(<App />);
-  await emitirSessao(null);
-}
+const indicadoresDeCarregamento = () =>
+  screen.container.queryAll((el) => el.type === 'ActivityIndicator');
 
-async function abrirNoModoSemConta() {
-  await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '1');
-  await abrirSemSessao();
-  expect(await screen.findByText(TITULO_SEMANA)).toBeOnTheScreen();
-}
-
-async function abrirLogado() {
-  await render(<App />);
-  await emitirSessao(USUARIO);
-  expect(await screen.findByText(TITULO_SEMANA)).toBeOnTheScreen();
-}
-
-const spinners = () => screen.container.queryAll((el) => el.type === 'ActivityIndicator');
-
-/** O único modal aberto no momento (o mock do Modal não renderiza os fechados). */
+// Modal visível no momento (modais fechados não renderizam o host "Modal").
 function modalAberto() {
   const modais = screen.container.queryAll((el) => el.type === 'Modal');
   expect(modais).toHaveLength(1);
   return within(modais[0]);
 }
 
-const nenhumModalAberto = () => screen.container.queryAll((el) => el.type === 'Modal').length === 0;
-
-async function abrirMenu() {
-  await fireEvent.press(screen.getByText('☰'));
-  return modalAberto();
+function botoesDoAlerta(alerta: jest.SpyInstance, chamada = 0): AlertButton[] {
+  return alerta.mock.calls[chamada][2] as AlertButton[];
 }
 
-/** Botões do último Alert.alert exibido. */
-function botoesDoUltimoAlerta(): AlertButton[] {
-  const chamadas = alerta.mock.calls;
-  return (chamadas[chamadas.length - 1][2] ?? []) as AlertButton[];
-}
+beforeEach(async () => {
+  jest.useFakeTimers({ now: AGORA, advanceTimers: true });
+  jest.clearAllMocks();
+  await AsyncStorage.clear();
 
-async function tocarNoBotaoDoAlerta(texto: string) {
-  const botao = botoesDoUltimoAlerta().find((b) => b.text === texto);
-  expect(botao).toBeDefined();
-  await act(async () => {
-    botao?.onPress?.();
+  jest.mocked(observarSessao).mockImplementation((cb) => {
+    emitirSessao = cb;
+    return cancelarSessao;
   });
-}
+  jest.mocked(sair).mockResolvedValue(undefined);
+  jest.mocked(obterEstadoSync).mockReturnValue(SEM_CONTA);
+  jest.mocked(observarEstadoSync).mockImplementation(() => jest.fn());
+  jest.mocked(sincronizarTudo).mockResolvedValue({ success: true, data: { enviados: 0, recebidos: 0 } });
+  jest.mocked(carregarMetaBaseLocal).mockImplementation(async (padrao = 100) => padrao);
+  jest.mocked(carregarGanhosLocais).mockResolvedValue({});
+  jest.mocked(carregarDividasLocais).mockResolvedValue([]);
+  jest.mocked(salvarGanhoLocalmente).mockResolvedValue(undefined);
+  jest.mocked(limparDadosLocais).mockResolvedValue(undefined);
+  jest.mocked(removerDividaLocal).mockResolvedValue([]);
+  jest.mocked(salvarDividaLocal).mockImplementation(async (d) => [d]);
+  jest.mocked(salvarMetaBaseLocal).mockResolvedValue(undefined);
+  jest.mocked(ImagePicker.requestMediaLibraryPermissionsAsync).mockResolvedValue(PERMISSAO_CONCEDIDA);
+  jest.mocked(ImagePicker.launchImageLibraryAsync).mockResolvedValue(PRINT_ESCOLHIDO);
+  jest.mocked(processarOCRLocal).mockResolvedValue({ textoBruto: 'Ganhos R$ 250,00', valorMetaExtrado: 250, percentualExtraido: null });
+});
 
-// ─── Portão de autenticação ───────────────────────────────────────────────────
+afterEach(() => {
+  jest.restoreAllMocks();
+  jest.mocked(AsyncStorage.getItem).mockReset().mockImplementation(getItemReal);
+  jest.useRealTimers();
+});
 
-describe('portão de autenticação', () => {
-  it('mostra o splash enquanto a sessão salva é lida', async () => {
+describe('App — gate de sessão', () => {
+  it('enquanto a sessão carrega, mostra o splash (sem AuthScreen e sem o app)', async () => {
     await render(<App />);
 
     expect(screen.getByText('Amortiza')).toBeOnTheScreen();
-    expect(spinners()).toHaveLength(1);
-    expect(screen.queryByText(CONTINUAR_SEM_CONTA)).not.toBeOnTheScreen();
-    expect(screen.queryByText(TITULO_SEMANA)).not.toBeOnTheScreen();
-    expect(observarSessaoMock).toHaveBeenCalledTimes(1);
+    expect(indicadoresDeCarregamento()).toHaveLength(1);
+    expect(screen.queryByText('Suas metas da semana, no seu ritmo.')).not.toBeOnTheScreen();
+    expect(screen.queryByText('Continuar sem conta')).not.toBeOnTheScreen();
+    expect(screen.queryByRole('tab')).not.toBeOnTheScreen();
+    expect(observarSessao).toHaveBeenCalledTimes(1);
   });
 
-  it('continua no splash enquanto a preferência "sem conta" é lida, mesmo com a sessão resolvida', async () => {
-    const leitura = adiado<string | null>();
-    asyncStorageMock.getItem.mockImplementationOnce(() => leitura.promessa);
+  it('mantém o splash enquanto a preferência de modo offline ainda não foi lida', async () => {
+    jest.mocked(AsyncStorage.getItem).mockImplementationOnce(() => new Promise<string | null>(() => {}));
+    await render(<App />);
 
-    await abrirSemSessao();
+    await emitir(null);
 
-    expect(spinners()).toHaveLength(1);
-    expect(screen.queryByText(CONTINUAR_SEM_CONTA)).not.toBeOnTheScreen();
-
-    await act(async () => leitura.resolver(null));
-    expect(await screen.findByText(CONTINUAR_SEM_CONTA)).toBeOnTheScreen();
-    expect(spinners()).toHaveLength(0);
+    expect(screen.getByText('Amortiza')).toBeOnTheScreen();
+    expect(screen.queryByText('Continuar sem conta')).not.toBeOnTheScreen();
+    expect(screen.queryByRole('tab')).not.toBeOnTheScreen();
   });
 
-  it('sem sessão e sem a preferência salva, mostra a AuthScreen sem "Voltar"', async () => {
-    await abrirSemSessao();
+  it('sessão nula e sem a flag offline: mostra a AuthScreen', async () => {
+    await render(<App />);
 
-    expect(await screen.findByText(CONTINUAR_SEM_CONTA)).toBeOnTheScreen();
-    expect(screen.getByTestId('auth-botao-principal')).toBeOnTheScreen();
-    expect(screen.queryByRole('button', { name: 'Voltar' })).not.toBeOnTheScreen();
-    expect(screen.queryByText(TITULO_SEMANA)).not.toBeOnTheScreen();
-    expect(spinners()).toHaveLength(0);
-    expect(definirUsuarioSyncMock).toHaveBeenCalledWith(null);
+    await emitir(null);
+
+    expect(screen.getByText('Suas metas da semana, no seu ritmo.')).toBeOnTheScreen();
+    expect(screen.getByRole('tab', { name: 'Entrar' })).toBeSelected();
+    expect(screen.getByText('Continuar sem conta')).toBeOnTheScreen();
+    expect(screen.queryByRole('tab', { name: 'Semana' })).not.toBeOnTheScreen();
+    expect(definirUsuarioSync).toHaveBeenCalledWith(null);
   });
 
-  it('"Continuar sem conta" grava a preferência e abre o app', async () => {
-    await abrirSemSessao();
+  it('"Continuar sem conta" abre o app principal e persiste a flag offline', async () => {
+    await render(<App />);
+    await emitir(null);
 
-    await fireEvent.press(await screen.findByText(CONTINUAR_SEM_CONTA));
+    await fireEvent.press(screen.getByText('Continuar sem conta'));
 
-    expect(await screen.findByText(TITULO_SEMANA)).toBeOnTheScreen();
-    expect(screen.getByText('Ganho Total da Semana')).toBeOnTheScreen();
-    expect(asyncStorageMock.setItem).toHaveBeenCalledWith(CHAVE_MODO_OFFLINE, '1');
-    await expect(AsyncStorage.getItem(CHAVE_MODO_OFFLINE)).resolves.toBe('1');
+    expect(await screen.findByRole('tab', { name: 'Semana' })).toBeSelected();
+    expect(screen.getByRole('header', { name: 'Semana' })).toBeOnTheScreen();
+    expect(screen.getByText('Ganho total da semana')).toBeOnTheScreen();
+    expect(screen.getByText('19 – 25 out')).toBeOnTheScreen();
+    expect(screen.queryByText('Continuar sem conta')).not.toBeOnTheScreen();
+    expect(await AsyncStorage.getItem(CHAVE_MODO_OFFLINE)).toBe('1');
+    // Sem conta: chip de sync "Sem conta" e avatar neutro.
+    expect(screen.getByRole('button', { name: 'Sem conta' })).toBeOnTheScreen();
+    expect(screen.getByLabelText('Conta')).toHaveTextContent('•');
   });
 
-  it('com a preferência "sem conta" salva, abre direto no app', async () => {
-    await abrirNoModoSemConta();
+  it('com a flag offline já salva, abre direto o app principal', async () => {
+    await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '1');
+    await render(<App />);
 
-    expect(screen.queryByText(CONTINUAR_SEM_CONTA)).not.toBeOnTheScreen();
-    expect(screen.getByText('Histórico de Registros')).toBeOnTheScreen();
+    await emitir(null);
+
+    expect(await screen.findByRole('tab', { name: 'Semana' })).toBeOnTheScreen();
+    expect(screen.queryByText('Continuar sem conta')).not.toBeOnTheScreen();
   });
 
-  it('com usuário logado, abre direto no app e liga a sincronização desse usuário', async () => {
-    await abrirLogado();
+  it('flag offline com valor diferente de "1" é ignorada', async () => {
+    await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '0');
+    await render(<App />);
 
-    expect(screen.queryByText(CONTINUAR_SEM_CONTA)).not.toBeOnTheScreen();
-    expect(definirUsuarioSyncMock).toHaveBeenCalledWith('user-123');
-    expect(sincronizarTudoMock).not.toHaveBeenCalled();
+    await emitir(null);
+
+    expect(screen.getByText('Continuar sem conta')).toBeOnTheScreen();
   });
 
-  it('entrar pela AuthScreen: quando a sessão chega, troca para o app', async () => {
-    await abrirSemSessao();
-    await fireEvent.changeText(await screen.findByLabelText('E-mail'), 'joao@exemplo.com');
-    await fireEvent.changeText(screen.getByLabelText('Senha'), 'segredo1');
+  it('sessão com usuário: abre direto o app principal e liga a sincronização', async () => {
+    await render(<App />);
 
-    await fireEvent.press(screen.getByTestId('auth-botao-principal'));
-    expect(entrarMock).toHaveBeenCalledWith('joao@exemplo.com', 'segredo1');
-    await emitirSessao(USUARIO); // o Supabase avisa a nova sessão
+    await emitir(GABRIEL);
 
-    expect(await screen.findByText(TITULO_SEMANA)).toBeOnTheScreen();
-    expect(screen.queryByText(CONTINUAR_SEM_CONTA)).not.toBeOnTheScreen();
-  });
-});
-
-// ─── Drawer: seção Conta ──────────────────────────────────────────────────────
-
-describe('drawer — conta logada', () => {
-  it('mostra o e-mail e "Sair da conta" (sem "Entrar ou criar conta")', async () => {
-    await abrirLogado();
-
-    const menu = await abrirMenu();
-
-    expect(menu.getByText('Conta')).toBeOnTheScreen();
-    expect(menu.getByText('joao@exemplo.com')).toBeOnTheScreen();
-    expect(menu.getByText(ITEM_SAIR)).toBeOnTheScreen();
-    expect(menu.queryByText(ITEM_ENTRAR)).not.toBeOnTheScreen();
-    expect(menu.getByTestId('drawer-status-sync')).toHaveTextContent('Aguardando sincronização');
+    expect(await screen.findByRole('tab', { name: 'Semana' })).toBeOnTheScreen();
+    expect(screen.getByLabelText('Conta')).toHaveTextContent('G');
+    expect(screen.queryByText('Continuar sem conta')).not.toBeOnTheScreen();
+    expect(definirUsuarioSync).toHaveBeenCalledWith('u1');
+    // definirUsuarioSync já dispara a sincronização; o App não chama sincronizarTudo de novo no login.
+    expect(sincronizarTudo).not.toHaveBeenCalled();
   });
 
-  it('o rodapé acompanha o estado da sincronização', async () => {
-    await abrirLogado();
-    const menu = await abrirMenu();
+  it('ao emitir logout (sessão nula), o gate volta para a AuthScreen', async () => {
+    await render(<App />);
+    await emitir(GABRIEL);
+    await screen.findByRole('tab', { name: 'Semana' });
 
-    await emitirSync({ status: 'ok', ultimaSync: new Date(2026, 9, 21, 10, 5).toISOString() });
+    await emitir(null);
 
-    expect(menu.getByTestId('drawer-status-sync')).toHaveTextContent('Sincronizado • 10:05');
+    expect(await screen.findByText('Continuar sem conta')).toBeOnTheScreen();
+    expect(screen.queryByRole('tab', { name: 'Semana' })).not.toBeOnTheScreen();
+    expect(definirUsuarioSync).toHaveBeenLastCalledWith(null);
   });
 
-  it('"Sair da conta" pede confirmação, sem fechar o menu', async () => {
-    await abrirLogado();
-    const menu = await abrirMenu();
+  it('logout volta para a AuthScreen mesmo se a flag offline estava salva', async () => {
+    await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '1');
+    await render(<App />);
+    await emitir(GABRIEL);
+    await screen.findByRole('tab', { name: 'Semana' });
 
-    await fireEvent.press(menu.getByText(ITEM_SAIR));
+    await emitir(null);
 
-    expect(alerta).toHaveBeenCalledWith('Sair da conta', 'Seus dados ficam salvos na nuvem.', [
-      { text: 'Cancelar', style: 'cancel' },
-      { text: 'Sair', style: 'destructive', onPress: expect.any(Function) },
-    ]);
-    expect(screen.getByText(ITEM_SAIR)).toBeOnTheScreen();
-    expect(sairMock).not.toHaveBeenCalled();
+    expect(await screen.findByText('Continuar sem conta')).toBeOnTheScreen();
   });
 
-  it('"Cancelar" na confirmação mantém a sessão', async () => {
-    await abrirLogado();
-    const menu = await abrirMenu();
-    await fireEvent.press(menu.getByText(ITEM_SAIR));
+  it('"Sair da conta" pede confirmação; ao confirmar, sai, limpa os dados locais e remove a flag', async () => {
+    const alerta = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '1');
+    await render(<App />);
+    await emitir(GABRIEL);
 
-    await tocarNoBotaoDoAlerta('Cancelar');
+    await fireEvent.press(await screen.findByLabelText('Conta'));
+    await fireEvent.press(screen.getByRole('button', { name: 'Sair da conta' }));
 
-    expect(sincronizarTudoMock).not.toHaveBeenCalled();
-    expect(sairMock).not.toHaveBeenCalled();
-    expect(storageMock.limparDadosLocais).not.toHaveBeenCalled();
-    expect(screen.getByText(TITULO_SEMANA)).toBeOnTheScreen();
-  });
-
-  it('"Sair": sincroniza, desliga o modo sem conta, encerra a sessão, apaga os dados e volta à AuthScreen', async () => {
-    await abrirLogado();
-    const menu = await abrirMenu();
-    await fireEvent.press(menu.getByText(ITEM_SAIR));
-
-    await tocarNoBotaoDoAlerta('Sair');
-
-    await waitFor(() => expect(storageMock.limparDadosLocais).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText(CONTINUAR_SEM_CONTA)).toBeOnTheScreen();
-    expect(screen.queryByRole('button', { name: 'Voltar' })).not.toBeOnTheScreen();
-    expect(screen.queryByText(TITULO_SEMANA)).not.toBeOnTheScreen();
-
-    expect(sincronizarTudoMock).toHaveBeenCalledWith('user-123');
-    expect(asyncStorageMock.removeItem).toHaveBeenCalledWith(CHAVE_MODO_OFFLINE);
-    expect(sairMock).toHaveBeenCalledTimes(1);
-    // Ordem: sincroniza → remove a preferência → encerra a sessão → apaga os dados locais
-    const ordem = [
-      sincronizarTudoMock.mock.invocationCallOrder[0],
-      asyncStorageMock.removeItem.mock.invocationCallOrder[0],
-      sairMock.mock.invocationCallOrder[0],
-      storageMock.limparDadosLocais.mock.invocationCallOrder[0],
-    ];
-    expect([...ordem].sort((a, b) => a - b)).toEqual(ordem);
-  });
-
-  it('se a sincronização falhar ao sair, avisa e só sai com "Sair mesmo assim"', async () => {
-    sincronizarTudoMock.mockResolvedValue({ success: false, error: 'Sem conexão com a internet.' });
-    await abrirLogado();
-    const menu = await abrirMenu();
-    await fireEvent.press(menu.getByText(ITEM_SAIR));
-
-    await tocarNoBotaoDoAlerta('Sair');
-
-    await waitFor(() =>
-      expect(alerta).toHaveBeenCalledWith(
-        'Não foi possível sincronizar',
-        'Sem conexão com a internet.\n\nSe sair agora, as alterações que ainda não foram enviadas serão apagadas deste aparelho.',
-        [
-          { text: 'Cancelar', style: 'cancel' },
-          { text: 'Sair mesmo assim', style: 'destructive', onPress: expect.any(Function) },
-        ]
-      )
-    );
-    expect(sairMock).not.toHaveBeenCalled();
-    expect(storageMock.limparDadosLocais).not.toHaveBeenCalled();
-    expect(screen.getByText(TITULO_SEMANA)).toBeOnTheScreen();
-
-    await tocarNoBotaoDoAlerta('Sair mesmo assim');
-
-    await waitFor(() => expect(storageMock.limparDadosLocais).toHaveBeenCalledTimes(1));
-    expect(sincronizarTudoMock).toHaveBeenCalledTimes(1); // não tenta sincronizar de novo
-    expect(sairMock).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText(CONTINUAR_SEM_CONTA)).toBeOnTheScreen();
-  });
-
-  it('"Cancelar" no aviso de falha da sincronização mantém a sessão', async () => {
-    sincronizarTudoMock.mockResolvedValue({ success: false, error: 'Sem conexão com a internet.' });
-    await abrirLogado();
-    const menu = await abrirMenu();
-    await fireEvent.press(menu.getByText(ITEM_SAIR));
-    await tocarNoBotaoDoAlerta('Sair');
-    await waitFor(() => expect(alerta).toHaveBeenCalledTimes(2));
-
-    await tocarNoBotaoDoAlerta('Cancelar');
-
-    expect(sairMock).not.toHaveBeenCalled();
-    expect(screen.getByText(TITULO_SEMANA)).toBeOnTheScreen();
-  });
-
-  it('sessão encerrada fora do menu volta à AuthScreen sem "Voltar" e remove a preferência sem conta', async () => {
-    await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '1'); // entrou depois de usar sem conta
-    await abrirLogado();
-
-    await emitirSessao(null); // ex.: sessão expirada
-    // Observação: neste caminho os dados locais não são apagados (só o "Sair" do menu chama limparDadosLocais)
-
-    expect(await screen.findByText(CONTINUAR_SEM_CONTA)).toBeOnTheScreen();
-    expect(screen.queryByRole('button', { name: 'Voltar' })).not.toBeOnTheScreen();
-    await waitFor(() => expect(asyncStorageMock.removeItem).toHaveBeenCalledWith(CHAVE_MODO_OFFLINE));
-    await expect(AsyncStorage.getItem(CHAVE_MODO_OFFLINE)).resolves.toBeNull();
-  });
-});
-
-describe('drawer — sem conta', () => {
-  it('oferece "Entrar ou criar conta" e avisa que os dados ficam no aparelho', async () => {
-    await abrirNoModoSemConta();
-
-    const menu = await abrirMenu();
-
-    expect(menu.getByText(ITEM_ENTRAR)).toBeOnTheScreen();
-    expect(menu.queryByText(ITEM_SAIR)).not.toBeOnTheScreen();
-    expect(menu.getByTestId('drawer-status-sync')).toHaveTextContent('Sem conta • dados só neste aparelho');
-  });
-
-  it('"Entrar ou criar conta" abre a AuthScreen com "Voltar", que retorna ao app', async () => {
-    await abrirNoModoSemConta();
-    const menu = await abrirMenu();
-
-    await fireEvent.press(menu.getByText(ITEM_ENTRAR));
-
-    expect(await screen.findByRole('button', { name: 'Voltar' })).toBeOnTheScreen();
-    expect(screen.getByText(CONTINUAR_SEM_CONTA)).toBeOnTheScreen();
-    expect(screen.queryByText(TITULO_SEMANA)).not.toBeOnTheScreen();
-
-    await fireEvent.press(screen.getByRole('button', { name: 'Voltar' }));
-
-    expect(await screen.findByText(TITULO_SEMANA)).toBeOnTheScreen();
-    expect(nenhumModalAberto()).toBe(true); // o menu não reabre
-  });
-
-  it('"Continuar sem conta" na AuthScreen aberta pelo menu também volta ao app', async () => {
-    await abrirNoModoSemConta();
-    const menu = await abrirMenu();
-    await fireEvent.press(menu.getByText(ITEM_ENTRAR));
-
-    await fireEvent.press(await screen.findByText(CONTINUAR_SEM_CONTA));
-
-    expect(await screen.findByText(TITULO_SEMANA)).toBeOnTheScreen();
-  });
-
-  it('entrar pela AuthScreen aberta no menu leva ao app logado', async () => {
-    await abrirNoModoSemConta();
-    const menu = await abrirMenu();
-    await fireEvent.press(menu.getByText(ITEM_ENTRAR));
-    await fireEvent.changeText(await screen.findByLabelText('E-mail'), 'joao@exemplo.com');
-    await fireEvent.changeText(screen.getByLabelText('Senha'), 'segredo1');
-
-    await fireEvent.press(screen.getByTestId('auth-botao-principal'));
-    await emitirSessao(USUARIO);
-
-    expect(await screen.findByText(TITULO_SEMANA)).toBeOnTheScreen();
-    const menuLogado = await abrirMenu();
-    expect(menuLogado.getByText('joao@exemplo.com')).toBeOnTheScreen();
-    expect(menuLogado.getByText(ITEM_SAIR)).toBeOnTheScreen();
-  });
-});
-
-// ─── App principal ────────────────────────────────────────────────────────────
-
-describe('app principal', () => {
-  it('troca de abas pela barra inferior (título e conteúdo)', async () => {
-    await abrirNoModoSemConta();
-    expect(screen.getByText('Ganho Total da Semana')).toBeOnTheScreen();
-
-    await fireEvent.press(screen.getByText('Carteira'));
-
-    expect(screen.getByText(TITULO_CARTEIRA)).toBeOnTheScreen();
-    expect(screen.getByText('💼 Visão Macro de Ganhos')).toBeOnTheScreen();
-    expect(screen.queryByText('Ganho Total da Semana')).not.toBeOnTheScreen();
-
-    await fireEvent.press(screen.getByText('Semana'));
-
-    expect(screen.getByText(TITULO_SEMANA)).toBeOnTheScreen();
-    expect(screen.queryByText('💼 Visão Macro de Ganhos')).not.toBeOnTheScreen();
-  });
-
-  it('troca de telas e abre a meta pelo menu, fechando-o', async () => {
-    await abrirNoModoSemConta();
-
-    let menu = await abrirMenu();
-    await fireEvent.press(menu.getByText('💼 Carteira & Controle Macro'));
-    expect(screen.getByText(TITULO_CARTEIRA)).toBeOnTheScreen();
-    expect(nenhumModalAberto()).toBe(true);
-
-    menu = await abrirMenu();
-    await fireEvent.press(menu.getByText('📊 Dashboard da Semana'));
-    expect(screen.getByText(TITULO_SEMANA)).toBeOnTheScreen();
-
-    menu = await abrirMenu();
-    await fireEvent.press(menu.getByText('🎯 Configurar Meta Diária'));
-    expect(modalAberto().getByText('Meta Diária Base')).toBeOnTheScreen();
-  });
-
-  it('exibe o histórico com os ganhos salvos no aparelho, nas duas abas', async () => {
-    bancoGanhos = {
-      '2026-10-19': ganho('2026-10-19', 90, { descricao: 'Ganho Seg' }),
-      '2026-10-21': ganho('2026-10-21', 150),
-    };
-    await abrirNoModoSemConta();
-
-    expect(screen.getByText('Histórico de Registros')).toBeOnTheScreen();
-    expect(screen.getByText('Ganho Qua')).toBeOnTheScreen();
-    expect(screen.getByText('Ganho: R$ 150.00 | Meta: R$ 100.00')).toBeOnTheScreen();
-    expect(screen.getByText('📅 21 de outubro de 2026')).toBeOnTheScreen();
-    expect(screen.getByText('Ganho Seg')).toBeOnTheScreen();
-    expect(screen.getByText('R$ 240,00')).toBeOnTheScreen();
-
-    await fireEvent.press(screen.getByText('Carteira'));
-    expect(screen.getByText('Ganho Qua')).toBeOnTheScreen();
-  });
-
-  it('lança um ganho pelo fluxo completo: FAB → digitar → dia → atalho → salvar', async () => {
-    await abrirNoModoSemConta();
-
-    await fireEvent.press(screen.getByText('+'));
-    const escolha = modalAberto();
-    expect(escolha.getByText('Adicionar Ganho')).toBeOnTheScreen();
-
-    await fireEvent.press(escolha.getByText('✍️ Digitar Ganho Manualmente'));
-    let lancamento = modalAberto();
-    expect(lancamento.getByText('Lançar Ganho')).toBeOnTheScreen();
-
-    await fireEvent.press(lancamento.getByText('Qua'));
-    lancamento = modalAberto();
-    expect(lancamento.getByText('📅 Quarta-feira, 21 de out (Hoje)')).toBeOnTheScreen();
-
-    await fireEvent.press(lancamento.getByText('+150'));
-    expect(lancamento.getByPlaceholderText('0.00')).toHaveDisplayValue('150');
-
-    await fireEvent.press(lancamento.getByText('Salvar Ganho'));
-
-    expect(storageMock.salvarGanhoLocalmente).toHaveBeenCalledWith(
-      expect.objectContaining({ dataISO: '2026-10-21', valor: 150, percentual: 100, descricao: 'Ganho Qua' })
-    );
     expect(alerta).toHaveBeenCalledWith(
-      '✅ Ganho Registrado!',
-      'Ganho de Qua atualizado para R$ 150.00.\n\n⚡ Dias adiantados pelo excedente:\nQui (50%)!'
+      'Sair da conta',
+      'Seus dados ficam salvos na nuvem e serão removidos deste aparelho.',
+      expect.any(Array),
     );
-    expect(nenhumModalAberto()).toBe(true);
-    // Dashboard: total, dia lançado selecionado e histórico
-    expect(screen.getByText('R$ 150,00')).toBeOnTheScreen();
-    expect(screen.getByText('Quarta-feira, 21 de out:')).toBeOnTheScreen();
-    expect(screen.getByText('Fez R$ 150,00')).toBeOnTheScreen();
-    expect(screen.getByText('+ Adicionar')).toBeOnTheScreen();
-    expect(screen.getByText('1/7 Dias Pagos')).toBeOnTheScreen();
-    expect(screen.getByText('Ganho Qua')).toBeOnTheScreen();
+    const botoes = botoesDoAlerta(alerta);
+    expect(botoes.map((b) => b.text)).toEqual(['Cancelar', 'Sair']);
+    expect(sair).not.toHaveBeenCalled();
 
-    // Carteira também reflete o ganho
-    await fireEvent.press(screen.getByText('Carteira'));
-    expect(screen.getByText('1 de 7 metas batidas')).toBeOnTheScreen();
-    expect(screen.getByText('Total arrecadado: R$ 150.00')).toBeOnTheScreen();
+    await act(async () => {
+      await botoes[1].onPress?.();
+    });
+
+    expect(sair).toHaveBeenCalledTimes(1);
+    expect(limparDadosLocais).toHaveBeenCalledTimes(1);
+    // Sincroniza antes de sair, para não apagar do aparelho o que ainda não foi para a nuvem.
+    expect(sincronizarTudo).toHaveBeenCalledWith('u1');
+    expect(jest.mocked(sincronizarTudo).mock.invocationCallOrder[0]).toBeLessThan(jest.mocked(sair).mock.invocationCallOrder[0]);
+    expect(jest.mocked(sair).mock.invocationCallOrder[0]).toBeLessThan(jest.mocked(limparDadosLocais).mock.invocationCallOrder[0]);
+    expect(await AsyncStorage.getItem(CHAVE_MODO_OFFLINE)).toBeNull();
+
+    // Após o signOut o Supabase emite a sessão nula.
+    await emitir(null);
+    expect(await screen.findByText('Continuar sem conta')).toBeOnTheScreen();
   });
 
-  it('soma ao ganho do dia pelo botão do dashboard', async () => {
-    bancoGanhos = { '2026-10-21': ganho('2026-10-21', 80) };
-    await abrirNoModoSemConta();
+  it('se a sincronização antes de sair falhar, avisa e só sai com "Sair mesmo assim"', async () => {
+    const alerta = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    jest.mocked(sincronizarTudo).mockResolvedValue({ success: false, error: 'Sem conexão. Dados salvos no aparelho.' });
+    await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '1');
+    await render(<App />);
+    await emitir(GABRIEL);
 
-    await fireEvent.press(screen.getByText('Qua'));
-    expect(screen.getByText('Fez R$ 80,00')).toBeOnTheScreen();
-    await fireEvent.press(screen.getByText('+ Adicionar'));
-    const lancamento = modalAberto();
-    expect(lancamento.getByText('💡 Já registrado neste dia: R$ 80.00')).toBeOnTheScreen();
-    await fireEvent.changeText(lancamento.getByPlaceholderText('0.00'), '50');
-    await fireEvent.press(modalAberto().getByText('+ Somar R$ 50.00 (Novo Total: R$ 130.00)'));
+    await fireEvent.press(await screen.findByLabelText('Conta'));
+    await fireEvent.press(screen.getByRole('button', { name: 'Sair da conta' }));
+    await act(async () => {
+      await botoesDoAlerta(alerta)[1].onPress?.(); // "Sair"
+    });
 
-    expect(storageMock.salvarGanhoLocalmente).toHaveBeenCalledWith(expect.objectContaining({ valor: 130 }));
-    expect(screen.getByText('Fez R$ 130,00')).toBeOnTheScreen();
-  });
-
-  it('cancelar o lançamento fecha o modal sem gravar', async () => {
-    await abrirNoModoSemConta();
-    await fireEvent.press(screen.getByText('+'));
-    await fireEvent.press(modalAberto().getByText('✍️ Digitar Ganho Manualmente'));
-
-    await fireEvent.press(modalAberto().getByText('Cancelar'));
-
-    expect(nenhumModalAberto()).toBe(true);
-    expect(storageMock.salvarGanhoLocalmente).not.toHaveBeenCalled();
-  });
-
-  it('altera a meta diária pelo botão do dashboard', async () => {
-    await abrirNoModoSemConta();
-
-    await fireEvent.press(screen.getByText('⚙️ Meta: R$ 100'));
-    const modal = modalAberto();
-    expect(modal.getByPlaceholderText('Ex: 100.00')).toHaveDisplayValue('100');
-    await fireEvent.changeText(modal.getByPlaceholderText('Ex: 100.00'), '150');
-    await fireEvent.press(modalAberto().getByText('Salvar Meta'));
-
-    expect(storageMock.salvarMetaBaseLocal).toHaveBeenCalledWith(150);
-    expect(alerta).toHaveBeenCalledWith('Meta Base Atualizada!', 'Sua meta diária base agora é de R$ 150.00.');
-    expect(screen.getByText('⚙️ Meta: R$ 150')).toBeOnTheScreen();
-    expect(screen.getByText('Progresso Semanal (Meta: R$ 1050.00):')).toBeOnTheScreen();
-    expect(nenhumModalAberto()).toBe(true);
-  });
-
-  it('cadastra e exclui uma dívida pela carteira', async () => {
-    await abrirNoModoSemConta();
-    await fireEvent.press(screen.getByText('Carteira'));
-    expect(screen.getByText('Nenhum gasto diário registrado (ex: combustível, almoço).')).toBeOnTheScreen();
-
-    await fireEvent.press(screen.getAllByText('+ Adicionar')[0]);
-    let modal = modalAberto();
-    expect(modal.getByText('Cadastrar Gasto Diário')).toBeOnTheScreen();
-    await fireEvent.changeText(modal.getByPlaceholderText('Ex: Combustível, Almoço'), 'Combustível');
-    await fireEvent.changeText(modalAberto().getByPlaceholderText('0.00'), '20');
-    modal = modalAberto();
-    await fireEvent.press(modal.getByText('Salvar Dívida'));
-
-    expect(alerta).toHaveBeenCalledWith('Dívida Registrada!', 'A dívida anual projetada foi recalculada automaticamente.');
-    expect(screen.getByText('Combustível')).toBeOnTheScreen();
-    expect(screen.getByText('R$ 20.00/dia')).toBeOnTheScreen();
-    expect(screen.getByText('R$ 7.300,00')).toBeOnTheScreen();
-
-    await fireEvent.press(screen.getByText('✕'));
+    // Nada foi apagado: o App pede uma segunda confirmação explicando o risco.
+    expect(sair).not.toHaveBeenCalled();
+    expect(limparDadosLocais).not.toHaveBeenCalled();
     expect(alerta).toHaveBeenLastCalledWith(
-      'Remover Dívida',
-      'Deseja excluir "Combustível" da sua carteira?',
-      expect.any(Array)
+      'Não foi possível sincronizar',
+      expect.stringContaining('Sem conexão. Dados salvos no aparelho.'),
+      expect.any(Array),
     );
-    await tocarNoBotaoDoAlerta('Excluir');
-
-    await waitFor(() => expect(screen.queryByText('Combustível')).not.toBeOnTheScreen());
-    expect(storageMock.removerDividaLocal).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('Nenhum gasto diário registrado (ex: combustível, almoço).')).toBeOnTheScreen();
-  });
-
-  it('logado, o botão ↻ sincroniza e relê o aparelho', async () => {
-    await abrirLogado();
-    bancoGanhos = { '2026-10-22': ganho('2026-10-22', 180) }; // chegou da nuvem
-
-    await fireEvent.press(screen.getByText('↻'));
-
-    expect(sincronizarTudoMock).toHaveBeenCalledWith('user-123');
-    expect(await screen.findByText('R$ 180,00')).toBeOnTheScreen();
-  });
-
-  it('sem conta, o botão ↻ só relê o aparelho', async () => {
-    await abrirNoModoSemConta();
-
-    await fireEvent.press(screen.getByText('↻'));
-
-    expect(sincronizarTudoMock).not.toHaveBeenCalled();
-    expect(storageMock.carregarGanhosLocais).toHaveBeenCalledTimes(2);
-  });
-
-  it('"Sincronizar Dados" no menu fecha o menu e sincroniza', async () => {
-    await abrirLogado();
-    const menu = await abrirMenu();
-
-    await fireEvent.press(menu.getByText('🔄 Sincronizar Dados'));
-
-    expect(nenhumModalAberto()).toBe(true);
-    await waitFor(() => expect(sincronizarTudoMock).toHaveBeenCalledWith('user-123'));
-  });
-
-  it('o pull-to-refresh usa a mesma atualização e mostra o indicador enquanto sincroniza', async () => {
-    const sincronizacao = adiado<ResultadoServico<{ enviados: number; recebidos: number }>>();
-    sincronizarTudoMock.mockReturnValueOnce(sincronizacao.promessa);
-    await abrirLogado();
-    const controleDeAtualizacao = () => {
-      const [rolagem] = screen.container.queryAll((el) => el.type === 'RCTScrollView');
-      return rolagem.props.refreshControl.props as { refreshing: boolean; onRefresh: () => Promise<void> };
-    };
-    expect(controleDeAtualizacao().refreshing).toBe(false);
-
-    let atualizacao!: Promise<void>;
-    await act(async () => {
-      atualizacao = controleDeAtualizacao().onRefresh();
-    });
-    expect(controleDeAtualizacao().refreshing).toBe(true);
-    expect(sincronizarTudoMock).toHaveBeenCalledWith('user-123');
+    const segundaConfirmacao = botoesDoAlerta(alerta, 1);
+    expect(segundaConfirmacao.map((btn) => btn.text)).toEqual(['Cancelar', 'Sair mesmo assim']);
 
     await act(async () => {
-      sincronizacao.resolver(SYNC_OK);
-      await atualizacao;
+      await segundaConfirmacao[1].onPress?.();
     });
-    expect(controleDeAtualizacao().refreshing).toBe(false);
+
+    expect(sair).toHaveBeenCalledTimes(1);
+    expect(limparDadosLocais).toHaveBeenCalledTimes(1);
+    expect(sincronizarTudo).toHaveBeenCalledTimes(1); // "Sair mesmo assim" não tenta sincronizar de novo
   });
 
-  it('uma sincronização concluída em segundo plano atualiza a tela', async () => {
-    await abrirLogado();
-    bancoGanhos = { '2026-10-19': ganho('2026-10-19', 250) };
+  it('no modo offline, "Entrar ou criar conta" abre a AuthScreen com "Voltar"', async () => {
+    await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '1');
+    await render(<App />);
+    await emitir(null);
 
-    await emitirSync({ status: 'ok', ultimaSync: '2026-10-21T13:10:00.000Z', mensagem: 'Sincronizado com a nuvem.' });
+    await fireEvent.press(await screen.findByLabelText('Conta'));
+    await fireEvent.press(screen.getByRole('button', { name: 'Entrar ou criar conta' }));
 
-    expect(await screen.findByText('R$ 250,00')).toBeOnTheScreen();
-    expect(screen.getByText('2/7 Dias Pagos')).toBeOnTheScreen();
+    expect(screen.getByRole('tab', { name: 'Entrar' })).toBeOnTheScreen();
+    expect(screen.queryByText('Continuar sem conta')).not.toBeOnTheScreen();
+
+    await fireEvent.press(screen.getByText('Voltar'));
+
+    expect(await screen.findByRole('tab', { name: 'Semana' })).toBeOnTheScreen();
+  });
+
+  it('no modo offline, tocar no indicador de sync abre o login; ao logar, volta ao app', async () => {
+    await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '1');
+    await render(<App />);
+    await emitir(null);
+
+    await fireEvent.press(await screen.findByRole('button', { name: 'Sem conta' }));
+    expect(screen.getByText('Voltar')).toBeOnTheScreen();
+
+    await emitir(GABRIEL);
+
+    expect(await screen.findByRole('tab', { name: 'Semana' })).toBeOnTheScreen();
+    expect(screen.getByLabelText('Conta')).toHaveTextContent('G');
+  });
+
+  it('logado, "Sincronizar agora" na conta dispara a sincronização do usuário', async () => {
+    await render(<App />);
+    await emitir(GABRIEL);
+
+    await fireEvent.press(await screen.findByRole('button', { name: 'Conta' }));
+    await fireEvent.press(screen.getByRole('button', { name: 'Sincronizar agora' }));
+
+    expect(sincronizarTudo).toHaveBeenCalledTimes(1);
+    expect(sincronizarTudo).toHaveBeenCalledWith('u1');
+  });
+
+  it('logado, tocar no chip de sync abre a conta (não o login)', async () => {
+    jest.mocked(obterEstadoSync).mockReturnValue({ status: 'ok', ultimaSync: '2026-10-21T12:00:00.000Z' });
+    await render(<App />);
+    await emitir(GABRIEL);
+
+    await fireEvent.press(await screen.findByRole('button', { name: 'Sincronizado' }));
+
+    expect(screen.getByRole('button', { name: 'Sair da conta' })).toBeOnTheScreen();
+    expect(screen.queryByRole('tab', { name: 'Entrar' })).not.toBeOnTheScreen();
+  });
+
+  it('cancela a observação da sessão ao desmontar', async () => {
+    await render(<App />);
+
+    await screen.unmount();
+
+    expect(cancelarSessao).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('App — fluxos principais (integração leve)', () => {
+  async function abrirAppOffline() {
+    await AsyncStorage.setItem(CHAVE_MODO_OFFLINE, '1');
+    await render(<App />);
+    await emitir(null);
+    await screen.findByRole('tab', { name: 'Semana' });
+  }
+
+  it('trocar para a aba Carteira mostra a carteira e o mês no cabeçalho', async () => {
+    await abrirAppOffline();
+
+    await fireEvent.press(screen.getByRole('tab', { name: 'Carteira' }));
+
+    expect(screen.getByRole('tab', { name: 'Carteira' })).toBeSelected();
+    expect(screen.getByRole('header', { name: 'Carteira' })).toBeOnTheScreen();
+    expect(screen.getByText('outubro de 2026')).toBeOnTheScreen();
+    expect(screen.getByText('Dívidas')).toBeOnTheScreen();
+    expect(screen.queryByText('Ganho total da semana')).not.toBeOnTheScreen();
+  });
+
+  it('o botão "+" abre direto o lançamento do dia selecionado (sem folha "Adicionar ganho")', async () => {
+    await abrirAppOffline();
+
+    await fireEvent.press(screen.getByRole('button', { name: 'Adicionar ganho' }));
+
+    const modal = modalAberto();
+    expect(modal.getByText('Lançar ganho')).toBeOnTheScreen();
+    expect(modal.getByText('Quarta, 21 out · hoje')).toBeOnTheScreen();
+    expect(modal.getByText('Já registrado: R$ 0,00')).toBeOnTheScreen();
+    expect(modal.getByRole('button', { name: 'Qua' })).toBeSelected();
+    expect(modal.getByRole('button', { name: 'Escanear print (OCR)' })).toBeOnTheScreen();
+    expect(screen.queryByText('Adicionar ganho')).not.toBeOnTheScreen();
+    expect(screen.queryByRole('button', { name: 'Digitar ganho' })).not.toBeOnTheScreen();
+  });
+
+  it('o "+" usa o dia selecionado no gráfico', async () => {
+    await abrirAppOffline();
+
+    await fireEvent.press(screen.getByRole('button', { name: 'Sexta-feira, 23 de out, 0% da meta' }));
+    await fireEvent.press(screen.getByRole('button', { name: 'Adicionar ganho' }));
+
+    expect(modalAberto().getByRole('button', { name: 'Sex' })).toBeSelected();
+    expect(modalAberto().getByText('Sexta, 23 out')).toBeOnTheScreen();
+  });
+
+  it('lançar ganho salva localmente, recalcula a semana e confirma no Alert', async () => {
+    const alerta = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    await abrirAppOffline();
+
+    await fireEvent.press(screen.getByRole('button', { name: 'Lançar ganho' }));
+    await fireEvent.changeText(screen.getByLabelText('Valor do ganho'), '150');
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar R$ 150,00' }));
+
+    expect(salvarGanhoLocalmente).toHaveBeenCalledTimes(1);
+    expect(salvarGanhoLocalmente).toHaveBeenCalledWith(
+      expect.objectContaining({ dataISO: '2026-10-21', valor: 150, metaDoDia: 100, percentual: 100, descricao: 'Ganho Qua' }),
+    );
+    expect(alerta).toHaveBeenCalledWith('Qua: R$ 150,00', 'Excedente adiantou: Qui 50%.');
+    expect(screen.queryByLabelText('Valor do ganho')).not.toBeOnTheScreen();
+    // Total da semana (hero) e card do dia selecionado (Qua) mostram o novo valor.
+    expect(screen.getAllByText('R$ 150,00')).toHaveLength(2);
+    expect(screen.getByText('Meta R$ 700 · 1/7 dias cobertos')).toBeOnTheScreen();
+    expect(screen.getByRole('button', { name: 'Quinta-feira, 22 de out, 50% da meta' })).toBeOnTheScreen();
+  });
+
+  // BUG documentado (ver relatório): a mensagem lista todo dia posterior com percentual > 0, inclusive
+  // dias cobertos pelo próprio ganho. Aqui Seg bate a meta exata (sem excedente) e Ter já tinha R$ 100.
+  it('"Excedente adiantou" não lista dias cobertos pelo próprio ganho', async () => {
+    const alerta = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    jest.mocked(carregarGanhosLocais).mockResolvedValue({ '2026-10-20': registro('2026-10-20', 100) });
+    await abrirAppOffline();
+    await screen.findByRole('button', { name: 'Terça-feira, 20 de out, 100% da meta' });
+
+    await fireEvent.press(screen.getByRole('button', { name: 'Segunda-feira, 19 de out, 0% da meta' }));
+    await fireEvent.press(screen.getByRole('button', { name: 'Lançar ganho' }));
+    await fireEvent.changeText(screen.getByLabelText('Valor do ganho'), '100');
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar R$ 100,00' }));
+
+    expect(alerta).toHaveBeenCalledWith('Seg: R$ 100,00', 'Ganho registrado.');
+  });
+
+  it('excluir dívida na Carteira pede confirmação no Alert e remove ao confirmar', async () => {
+    const alerta = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    jest.mocked(carregarDividasLocais).mockResolvedValue([COMBUSTIVEL]);
+    await abrirAppOffline();
+    await fireEvent.press(screen.getByRole('tab', { name: 'Carteira' }));
+
+    await fireEvent.press(await screen.findByLabelText('Excluir Combustível'));
+
+    expect(alerta).toHaveBeenCalledWith('Remover', 'Excluir "Combustível"?', expect.any(Array));
+    expect(removerDividaLocal).not.toHaveBeenCalled();
+
+    const excluir = botoesDoAlerta(alerta).find((b) => b.text === 'Excluir');
+    await act(async () => {
+      await excluir?.onPress?.();
+    });
+
+    expect(removerDividaLocal).toHaveBeenCalledWith('d1');
+    expect(screen.queryByText('Combustível')).not.toBeOnTheScreen();
+    expect(screen.getByText('Ex.: combustível, almoço.')).toBeOnTheScreen();
+  });
+
+  it('nova dívida imprevista pela Carteira é gravada com tipo, frequência e data de hoje', async () => {
+    await abrirAppOffline();
+    await fireEvent.press(screen.getByRole('tab', { name: 'Carteira' }));
+
+    // Terceiro "+ Adicionar" = seção Imprevistos.
+    await fireEvent.press(screen.getAllByRole('button', { name: '+ Adicionar' })[2]);
+    expect(screen.getByText('Imprevisto')).toBeOnTheScreen();
+    await fireEvent.press(screen.getByRole('button', { name: 'Mensal' }));
+    await fireEvent.changeText(screen.getByPlaceholderText('Ex.: Manutenção do pneu'), 'Lavagem');
+    await fireEvent.changeText(screen.getByPlaceholderText('0,00'), '50');
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+    expect(salvarDividaLocal).toHaveBeenCalledWith(
+      expect.objectContaining({ descricao: 'Lavagem', valor: 50, tipo: 'imprevista', frequenciaImprevisto: 'mensal', dataLancamento: '2026-10-21' }),
+    );
+    expect(screen.queryByText('Imprevisto')).not.toBeOnTheScreen();
+    expect(screen.getByText('Lavagem')).toBeOnTheScreen();
+    expect(screen.getByText('Mensal · R$ 600/ano')).toBeOnTheScreen();
+  });
+
+  it('nova dívida diária não leva frequência de imprevisto', async () => {
+    await abrirAppOffline();
+    await fireEvent.press(screen.getByRole('tab', { name: 'Carteira' }));
+
+    await fireEvent.press(screen.getAllByRole('button', { name: '+ Adicionar' })[0]);
+    await fireEvent.changeText(screen.getByPlaceholderText('Ex.: Combustível, almoço'), 'Combustível');
+    await fireEvent.changeText(screen.getByPlaceholderText('0,00'), '30');
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+    expect(salvarDividaLocal).toHaveBeenCalledWith(expect.objectContaining({ tipo: 'diaria', frequenciaImprevisto: undefined }));
+    expect(screen.getByText('Combustível')).toBeOnTheScreen();
+    expect(screen.getByText('R$ 10.950/ano')).toBeOnTheScreen();
+  });
+
+  it('tocar na linha da meta abre a meta diária, grava e recalcula a meta semanal', async () => {
+    await abrirAppOffline();
+
+    await fireEvent.press(screen.getByRole('button', { name: 'Meta R$ 700 · 0/7 dias cobertos' }));
+    expect(screen.getByText('Quanto você quer fazer por dia?')).toBeOnTheScreen();
+    await fireEvent.changeText(screen.getByPlaceholderText('100'), '150');
+    await fireEvent.press(screen.getByRole('button', { name: 'Salvar' }));
+
+    expect(salvarMetaBaseLocal).toHaveBeenCalledWith(150);
+    expect(screen.queryByText('Quanto você quer fazer por dia?')).not.toBeOnTheScreen();
+    expect(screen.getByText('Meta R$ 1.050 · 0/7 dias cobertos')).toBeOnTheScreen();
+  });
+
+  describe('OCR do print', () => {
+    // O "+" abre o lançamento; o OCR é a ação secundária dentro dele.
+    async function escanearPrint() {
+      await fireEvent.press(screen.getByRole('button', { name: 'Adicionar ganho' }));
+      await fireEvent.press(screen.getByRole('button', { name: 'Escanear print (OCR)' }));
+    }
+
+    it('sem permissão de fotos, avisa no Alert e não abre a galeria', async () => {
+      const alerta = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+      jest.mocked(ImagePicker.requestMediaLibraryPermissionsAsync).mockResolvedValue(PERMISSAO_NEGADA);
+      await abrirAppOffline();
+
+      await escanearPrint();
+
+      expect(alerta).toHaveBeenCalledWith('Permissão necessária', 'Permita o acesso às fotos para ler o print.');
+      expect(ImagePicker.launchImageLibraryAsync).not.toHaveBeenCalled();
+      expect(processarOCRLocal).not.toHaveBeenCalled();
+      expect(screen.queryByText('Valor encontrado')).not.toBeOnTheScreen();
+      // O formulário manual continua aberto.
+      expect(screen.getByLabelText('Valor do ganho')).toBeOnTheScreen();
+    });
+
+    it('seleção cancelada não roda o OCR e mantém o formulário manual', async () => {
+      jest.mocked(ImagePicker.launchImageLibraryAsync).mockResolvedValue({ canceled: true, assets: null } as ResultadoPicker);
+      await abrirAppOffline();
+
+      await escanearPrint();
+
+      expect(processarOCRLocal).not.toHaveBeenCalled();
+      expect(screen.queryByText('Valor encontrado')).not.toBeOnTheScreen();
+      expect(screen.queryByText('Lendo o print…')).not.toBeOnTheScreen();
+      expect(screen.getByLabelText('Valor do ganho')).toHaveDisplayValue('');
+    });
+
+    it('valor lido no print abre a confirmação e "Confirmar e salvar" grava esse valor', async () => {
+      const alerta = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+      await abrirAppOffline();
+
+      await escanearPrint();
+
+      expect(ImagePicker.launchImageLibraryAsync).toHaveBeenCalledWith({ mediaTypes: ['images'], quality: 0.8 });
+      expect(processarOCRLocal).toHaveBeenCalledWith('file:///print.png');
+      expect(screen.getByText('Valor encontrado')).toBeOnTheScreen();
+      expect(screen.getByText('para Quarta, 21 out · hoje')).toBeOnTheScreen();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Confirmar e salvar' }));
+
+      expect(salvarGanhoLocalmente).toHaveBeenCalledWith(expect.objectContaining({ dataISO: '2026-10-21', valor: 250, percentual: 100 }));
+      expect(alerta).toHaveBeenCalledWith('Qua: R$ 250,00', 'Excedente adiantou: Qui 100%, Sex 50%.');
+    });
+
+    it('o print vale para o dia escolhido no formulário (não para o dia do gráfico)', async () => {
+      jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+      await abrirAppOffline();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Adicionar ganho' }));
+      await fireEvent.press(modalAberto().getByRole('button', { name: 'Sex' }));
+      await fireEvent.press(screen.getByRole('button', { name: 'Escanear print (OCR)' }));
+
+      expect(screen.getByText('para Sexta, 23 out')).toBeOnTheScreen();
+      await fireEvent.press(screen.getByRole('button', { name: 'Confirmar e salvar' }));
+      expect(salvarGanhoLocalmente).toHaveBeenCalledWith(expect.objectContaining({ dataISO: '2026-10-23', valor: 250 }));
+    });
+
+    it('"Digitar manualmente" volta ao formulário com o valor lido já preenchido', async () => {
+      await abrirAppOffline();
+      await escanearPrint();
+
+      await fireEvent.press(screen.getByRole('button', { name: 'Digitar manualmente' }));
+
+      expect(modalAberto().getByText('Lançar ganho')).toBeOnTheScreen();
+      expect(screen.getByLabelText('Valor do ganho')).toHaveDisplayValue('250,00');
+      expect(screen.getByRole('button', { name: 'Salvar R$ 250,00' })).toBeEnabled();
+    });
+
+    it('print sem valor reconhecível cai no formulário manual vazio', async () => {
+      jest.mocked(processarOCRLocal).mockResolvedValue({ textoBruto: 'sem números', valorMetaExtrado: null, percentualExtraido: null });
+      await abrirAppOffline();
+
+      await escanearPrint();
+
+      expect(screen.queryByText('Valor encontrado')).not.toBeOnTheScreen();
+      expect(modalAberto().getByText('Lançar ganho')).toBeOnTheScreen();
+      expect(screen.getByLabelText('Valor do ganho')).toHaveDisplayValue('');
+    });
   });
 });

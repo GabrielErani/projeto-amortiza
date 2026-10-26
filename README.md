@@ -62,6 +62,13 @@ O aplicativo combina um dashboard operacional ágil estilo Uber com uma carteira
 
 ---
 
+### 4. Interface Minimalista com Design Tokens 🎨
+* **Primeira página só com o essencial:** total da semana em destaque, meta e dias cobertos, gráfico de 7 barras e o card do dia selecionado com um único botão "Lançar ganho".
+* **Lançamento em um toque:** o botão "+" abre direto o lançamento; o OCR do print fica como ação secundária dentro do mesmo painel.
+* **Conta em um painel inferior:** e-mail, estado da nuvem, meta diária, "Sincronizar agora" e "Sair da conta" substituem o menu lateral.
+* **Design tokens em `src/theme.ts`:** cores, espaçamentos, raios, tipografia e superfícies em um só lugar; nenhum literal de estilo fica nas telas (um teste garante isso), então mudar o visual é editar um arquivo.
+* **Acessível:** alvos de toque de 44 pt, papéis e estados de acessibilidade em botões, abas, gráfico e barra de progresso.
+
 ## ⚙️ Configurar o Supabase (obrigatório para o modo online)
 
 Sem esta etapa o app funciona apenas no modo local: a sincronização mostrará **"Banco não configurado"**.
