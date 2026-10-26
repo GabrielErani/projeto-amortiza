@@ -94,6 +94,32 @@ EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_XXXXXXXX
 * **Motor de OCR Local:** [Google ML Kit Text Recognition v2](https://developers.google.com/ml-kit/vision/text-recognition/v2)
 
 ---
+* **Testes:** [Jest](https://jestjs.io/) com [jest-expo](https://docs.expo.dev/develop/unit-testing/) e [Testing Library](https://callstack.github.io/react-native-testing-library/)
+
+## 🧪 Testes
+
+Cada função de `src/utils`, `src/services`, `src/hooks`, dos componentes e das telas tem testes próprios em `__tests__/`,
+escritos com [Jest](https://jestjs.io/) (preset [jest-expo](https://docs.expo.dev/develop/unit-testing/)) e
+[Testing Library](https://callstack.github.io/react-native-testing-library/). O AsyncStorage usa o
+[mock oficial](https://react-native-async-storage.github.io/async-storage/docs/advanced/jest/) e o Supabase é simulado,
+então a suíte roda offline.
+
+```powershell
+# Rodar todos os testes
+npm test
+
+# Modo observação (reexecuta ao salvar)
+npm run test:watch
+
+# Checagem de tipos
+npm run typecheck
+```
+
+| Pasta | O que cobre |
+|---|---|
+| `__tests__/utils` | datas, motor de amortização em cascata, dívidas e formatação monetária |
+| `__tests__/services` | autenticação, sincronização bidirecional, armazenamento local, cliente Supabase e OCR |
+| `__tests__/ui` | componentes, hooks, telas e o fluxo de login/sem conta do App |
 
 ## 🚀 Como Executar o Projeto
 
